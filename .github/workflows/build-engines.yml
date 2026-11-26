@@ -1,0 +1,118 @@
+name: Build Ren'Py iOS Engine Frameworks
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'GitHub Release tag to publish engine packs under'
+        required: false
+        type: string
+        default: 'engines-v1'
+
+permissions:
+  contents: write
+
+jobs:
+  build-engine:
+    name: Build ${{ matrix.version }} (${{ matrix.framework }})
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag: '8.6.1.26111705'
+            version: '8.6.1'
+            framework: 'renpy8_6_1'
+          - tag: '8.5.3.26051504'
+            version: '8.5.3'
+            framework: 'renpy8_5_3'
+          - tag: '8.4.1.25072401'
+            version: '8.4.1'
+            framework: 'renpy8_4_1'
+          - tag: '8.3.7.25031702'
+            version: '8.3.7'
+            framework: 'renpy8_3_7'
+          - tag: '7.8.7.25031702'
+            version: '7.8.7'
+            framework: 'renpy7_8_7'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          XCODE_APP=$(find /Applications -maxdepth 1 -name "Xcode*.app" | sort -V | tail -n 1)
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          sudo xcodebuild -license accept
+          xcodebuild -version
+
+      - name: Build dynamic framework and engine archive
+        run: |
+          chmod +x scripts/build_engine.sh
+          ./scripts/build_engine.sh "${{ matrix.tag }}" "${{ matrix.version }}" "${{ matrix.framework }}" "$PWD/out"
+
+      - name: Upload engine artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{ matrix.version }}
+          path: |
+            out/frameworks/renpy-${{ matrix.version }}-framework.zip
+            out/frameworks/MetalANGLE.framework.zip
+            out/engines/renpy-${{ matrix.version }}-engine.zip
+            out/metadata/${{ matrix.version }}.json
+
+  publish-engines:
+    name: Publish Engine Release
+    needs: build-engine
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate engines-manifest.json
+        run: |
+          python3 - << 'PYEOF'
+          import glob, hashlib, json, os
+
+          entries = []
+          for meta_path in sorted(glob.glob("dist/metadata/*.json")):
+              with open(meta_path, "r", encoding="utf-8") as f:
+                  entry = json.load(f)
+              ver = entry["version"]
+              fw_zip = f"dist/frameworks/renpy-{ver}-framework.zip"
+              eng_zip = f"dist/engines/renpy-{ver}-engine.zip"
+              entry["frameworkSha256"] = hashlib.sha256(open(fw_zip, "rb").read()).hexdigest()
+              entry["engineSha256"] = hashlib.sha256(open(eng_zip, "rb").read()).hexdigest()
+              entries.append(entry)
+
+          entries.sort(key=lambda e: [int(x) for x in e["version"].split(".")], reverse=True)
+          manifest = {"schemaVersion": 1, "engines": entries}
+          with open("dist/engines-manifest.json", "w", encoding="utf-8") as f:
+              json.dump(manifest, f, indent=2)
+          print(json.dumps(manifest, indent=2))
+          PYEOF
+
+      - name: Collect release assets
+        run: |
+          mkdir -p release_assets
+          cp dist/frameworks/MetalANGLE.framework.zip release_assets/
+          cp dist/frameworks/renpy-*-framework.zip release_assets/
+          cp dist/engines/renpy-*-engine.zip release_assets/
+          cp dist/engines-manifest.json release_assets/
+          ls -lh release_assets/
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag || 'engines-v1' }}"
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "RenPlay Engine Frameworks ($TAG)" \
+            --notes "Prebuilt arm64 iOS dynamic Ren'Py engine frameworks and Python runtime archives built from official renpy/renpy releases." \
+            release_assets/*
