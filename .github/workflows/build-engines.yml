@@ -58,7 +58,7 @@ jobs:
           name: engine-${{ matrix.version }}
           path: |
             out/frameworks/renpy-${{ matrix.version }}-framework.zip
-            out/frameworks/MetalANGLE.framework.zip
+            out/frameworks/MetalANGLE-${{ matrix.version }}.framework.zip
             out/engines/renpy-${{ matrix.version }}-engine.zip
             out/metadata/${{ matrix.version }}.json
 
@@ -99,7 +99,8 @@ jobs:
       - name: Collect release assets
         run: |
           mkdir -p release_assets
-          cp dist/frameworks/MetalANGLE.framework.zip release_assets/
+          METALANGLE_ZIP=$(ls dist/frameworks/MetalANGLE-*.framework.zip | sort -V | tail -n 1)
+          cp "$METALANGLE_ZIP" release_assets/MetalANGLE.framework.zip
           cp dist/frameworks/renpy-*-framework.zip release_assets/
           cp dist/engines/renpy-*-engine.zip release_assets/
           cp dist/engines-manifest.json release_assets/

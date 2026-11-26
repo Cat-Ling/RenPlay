@@ -285,7 +285,7 @@ fi
 
 # Package framework zip and already-thinned MetalANGLE.framework
 (cd "$OUT_DIR/frameworks" && zip -q -r -y "renpy-${VER}-framework.zip" "${FW_NAME}.framework")
-(cd "$OUT_DIR/frameworks" && zip -q -r -y "MetalANGLE.framework.zip" "MetalANGLE.framework")
+(cd "$OUT_DIR/frameworks" && zip -q -r -y "MetalANGLE-${VER}.framework.zip" "MetalANGLE.framework")
 
 # Assemble Python runtime pack: base/main.py, base/renpy/, base/lib/
 STAGE="$WORK_DIR/engine_stage"

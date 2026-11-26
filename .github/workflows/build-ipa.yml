@@ -25,7 +25,7 @@ permissions:
 jobs:
   test-core:
     name: Run RenPlayCore Unit Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -63,10 +63,14 @@ jobs:
 
       - name: Install xtool
         run: |
-          curl -fsSL https://github.com/xtool-org/xtool/releases/latest/download/xtool.app.zip -o xtool.app.zip
-          unzip -q xtool.app.zip -d /Applications
-          rm -f xtool.app.zip
-          /Applications/xtool.app/Contents/Resources/bin/xtool --version || /Applications/xtool.app/Contents/MacOS/xtool --version
+          if ! brew install xtool-org/tap/xtool; then
+            curl -fsSL https://github.com/xtool-org/xtool/releases/latest/download/xtool.app.zip -o xtool.app.zip
+            unzip -q xtool.app.zip -d /Applications
+            rm -f xtool.app.zip
+            XTOOL_BIN=$(find /Applications/xtool.app -type f -perm +111 -name "xtool" | head -n 1)
+            sudo ln -sf "$XTOOL_BIN" /usr/local/bin/xtool
+          fi
+          xtool --version
 
       - name: Fetch prebuilt engine frameworks
         env:
@@ -77,11 +81,7 @@ jobs:
 
       - name: Build unsigned IPA with xtool
         run: |
-          XTOOL_BIN="/Applications/xtool.app/Contents/Resources/bin/xtool"
-          if [ ! -x "$XTOOL_BIN" ]; then
-            XTOOL_BIN="/Applications/xtool.app/Contents/MacOS/xtool"
-          fi
-          "$XTOOL_BIN" dev build --ipa -c release
+          xtool dev build --ipa -c release
           ls -lh xtool/*.ipa
 
       - name: Strip signatures for clean sideloading
