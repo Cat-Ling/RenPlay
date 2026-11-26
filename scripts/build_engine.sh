@@ -114,10 +114,7 @@ if [ -f "$PBXPROJ" ]; then
     # Extract "-l..." tokens from OTHER_LDFLAGS, filtering python version for dual-py releases
     while IFS= read -r flag; do
         [ -z "$flag" ] && continue
-        if [[ "$flag" == -lpython* ]] && [[ "$flag" != "-lpython${PY_VER}" ]]; then
-            continue
-        fi
-        if [ "$flag" = "-lrenpython" ] || [ "$flag" = "-lrenpy" ]; then
+        if [[ "$flag" == -lpython* ]] || [ "$flag" = "-lrenpython" ] || [ "$flag" = "-lrenpy" ]; then
             continue
         fi
         LIB_NAME="${flag#-l}"
@@ -142,10 +139,7 @@ fi
 for libfile in "$PREBUILT_DIR"/lib*.a; do
     base="$(basename "$libfile" .a)"
     name="${base#lib}"
-    if [ "$name" = "renpython" ] || [ "$name" = "renpy" ] || [[ "$name" == *_test ]] || [ "$name" = "mockrt" ]; then
-        continue
-    fi
-    if [[ "$name" == python* ]] && [[ "$name" != "python${PY_VER}" ]]; then
+    if [ "$name" = "renpython" ] || [ "$name" = "renpy" ] || [[ "$name" == python* ]] || [[ "$name" == *_test ]] || [ "$name" = "mockrt" ]; then
         continue
     fi
     flag="-l${name}"
@@ -178,8 +172,9 @@ fi
 
 # Collect undefined-symbol hints so SDL input helpers are exported when present in libSDL
 SDL_EXPORT_FLAGS=("-Wl,-u,_launcher_main")
+SDL_NM="$(nm -g "$PREBUILT_DIR"/libSDL*.a 2>/dev/null || true)"
 for sym in _SDL_PushEvent _SDL_StartTextInput _SDL_StopTextInput _SDL_GetKeyboardFocus; do
-    if nm -g "$PREBUILT_DIR"/libSDL*.a 2>/dev/null | grep -q " T ${sym}$"; then
+    if grep -Fq " T ${sym}" <<< "$SDL_NM"; then
         SDL_EXPORT_FLAGS+=("-Wl,-u,${sym}")
     fi
 done
@@ -190,7 +185,7 @@ if [ -d "$IOS_SDK/System/Library/Frameworks/DeclaredAgeRange.framework" ]; then
 fi
 
 # Link the dynamic framework without -force_load (avoids duplicate archive members in upstream librenpy.a).
-# Pulling _launcher_main brings in _init_librenpy and the full PyInit_* inittab.
+# Place -lpython${PY_VER} before LINKER_LIBS (-lffi) so Python's symbols resolve in upstream order.
 "$CLANG" -dynamiclib \
     -arch arm64 \
     -isysroot "$IOS_SDK" \
@@ -204,8 +199,11 @@ fi
     "${SDL_EXPORT_FLAGS[@]}" \
     -lrenpython \
     -lrenpy \
+    "-lpython${PY_VER}" \
     "${LINKER_LIBS[@]}" \
     -framework MetalANGLE \
+    -framework Metal \
+    -framework CoreVideo \
     -framework UIKit \
     -framework Foundation \
     -framework CoreGraphics \
@@ -274,12 +272,13 @@ plutil -lint "$FW_DIR/Info.plist"
 echo "=== Verification: otool -L ${FW_NAME} ==="
 otool -L "$FW_DIR/$FW_NAME"
 echo "=== Verification: exported entry symbols ==="
-nm -gU "$FW_DIR/$FW_NAME" | grep -E '(_launcher_main|_renplay_launch|_SDL_PushEvent|_SDL_StartTextInput|_SDL_StopTextInput)' || true
-if ! nm -gU "$FW_DIR/$FW_NAME" | grep -q '_launcher_main'; then
+NM_EXPORTS="$(nm -gU "$FW_DIR/$FW_NAME")"
+printf '%s\n' "$NM_EXPORTS" | grep -E '(_launcher_main|_renplay_launch|_SDL_PushEvent|_SDL_StartTextInput|_SDL_StopTextInput)' || true
+if ! grep -Fq '_launcher_main' <<< "$NM_EXPORTS"; then
     echo "Error: _launcher_main not exported in $FW_DIR/$FW_NAME" >&2
     exit 1
 fi
-if ! nm -gU "$FW_DIR/$FW_NAME" | grep -q '_renplay_launch'; then
+if ! grep -Fq '_renplay_launch' <<< "$NM_EXPORTS"; then
     echo "Error: _renplay_launch not exported in $FW_DIR/$FW_NAME" >&2
     exit 1
 fi
