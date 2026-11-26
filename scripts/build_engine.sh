@@ -54,10 +54,10 @@ if [ -z "$SDK_ROOT" ] || [ ! -d "$SDK_ROOT/renpy" ]; then
     exit 1
 fi
 
-# Locate MetalANGLE.framework (ios-arm64 slice)
-METALANGLE_SRC="$(find "$PROTO_DIR" -path "*ios-arm64*MetalANGLE.framework" -type d | head -n 1)"
+# Locate MetalANGLE.framework (device slice only, never *-simulator)
+METALANGLE_SRC="$(find "$PROTO_DIR" -path "*/ios-arm64/MetalANGLE.framework" -type d | head -n 1)"
 if [ -z "$METALANGLE_SRC" ]; then
-    METALANGLE_SRC="$(find "$PROTO_DIR" -name "MetalANGLE.framework" -type d | head -n 1)"
+    METALANGLE_SRC="$(find "$PROTO_DIR" -name "MetalANGLE.framework" -type d -not -path "*-simulator*" | head -n 1)"
 fi
 if [ -z "$METALANGLE_SRC" ]; then
     echo "Error: MetalANGLE.framework not found in $PROTO_DIR" >&2
@@ -142,7 +142,7 @@ fi
 for libfile in "$PREBUILT_DIR"/lib*.a; do
     base="$(basename "$libfile" .a)"
     name="${base#lib}"
-    if [ "$name" = "renpython" ] || [ "$name" = "renpy" ]; then
+    if [ "$name" = "renpython" ] || [ "$name" = "renpy" ] || [[ "$name" == *_test ]] || [ "$name" = "mockrt" ]; then
         continue
     fi
     if [[ "$name" == python* ]] && [[ "$name" != "python${PY_VER}" ]]; then
