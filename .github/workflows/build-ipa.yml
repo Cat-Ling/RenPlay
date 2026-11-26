@@ -1,0 +1,134 @@
+name: Build RenPlay Unsigned IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      engines_release:
+        description: 'GitHub Release tag containing prebuilt RenPy engine frameworks'
+        required: false
+        type: string
+        default: 'engines-v1'
+      app_tag:
+        description: 'Release tag for the built IPA (leave empty for build-only or v1.0.0-<sha>)'
+        required: false
+        type: string
+        default: ''
+      publish_release:
+        description: 'Publish unsigned IPA to GitHub Releases'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  test-core:
+    name: Run RenPlayCore Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install zlib dev headers
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
+
+      - name: Setup Swift 6.2
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '6.2'
+
+      - name: Run unit tests
+        run: swift test --filter RenPlayCoreTests
+
+  build-ipa:
+    name: Build Unsigned IPA
+    needs: test-core
+    runs-on: macos-15
+    env:
+      NSUnbufferedIO: 'YES'
+      GIT_TERMINAL_PROMPT: '0'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          XCODE_APP=$(find /Applications -maxdepth 1 -name "Xcode*.app" | sort -V | tail -n 1)
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          sudo xcodebuild -license accept
+          xcodebuild -version
+          defaults write com.apple.dt.Xcode IDESkipMacroFingerprintValidation -bool YES
+          defaults write com.apple.dt.Xcode IDESkipPackagePluginFingerprintValidatation -bool YES
+
+      - name: Install xtool
+        run: |
+          curl -fsSL https://github.com/xtool-org/xtool/releases/latest/download/xtool.app.zip -o xtool.app.zip
+          unzip -q xtool.app.zip -d /Applications
+          rm -f xtool.app.zip
+          /Applications/xtool.app/Contents/Resources/bin/xtool --version || /Applications/xtool.app/Contents/MacOS/xtool --version
+
+      - name: Fetch prebuilt engine frameworks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x scripts/fetch_engines.sh
+          ./scripts/fetch_engines.sh "${{ github.event.inputs.engines_release || 'engines-v1' }}"
+
+      - name: Build unsigned IPA with xtool
+        run: |
+          XTOOL_BIN="/Applications/xtool.app/Contents/Resources/bin/xtool"
+          if [ ! -x "$XTOOL_BIN" ]; then
+            XTOOL_BIN="/Applications/xtool.app/Contents/MacOS/xtool"
+          fi
+          "$XTOOL_BIN" dev build --ipa -c release
+          ls -lh xtool/*.ipa
+
+      - name: Strip signatures for clean sideloading
+        run: |
+          IPA_SRC=$(ls xtool/*.ipa | head -n 1)
+          mkdir -p repack
+          unzip -q "$IPA_SRC" -d repack
+          APP_PATH=$(find repack/Payload -maxdepth 1 -name "*.app" | head -n 1)
+          codesign --remove-signature "$APP_PATH" 2>/dev/null || true
+          find "$APP_PATH" \( -name "*.dylib" -o -name "*.framework" -o -name "*.appex" \) -print0 | \
+            while IFS= read -r -d '' f; do
+              codesign --remove-signature "$f" 2>/dev/null || true
+            done
+          mkdir -p dist
+          (cd repack && zip -q -r -y "../dist/RenPlay.ipa" Payload)
+          ls -lh dist/RenPlay.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RenPlay-ipa
+          path: dist/RenPlay.ipa
+
+  publish-release:
+    name: Publish IPA Release
+    needs: build-ipa
+    if: ${{ github.event.inputs.publish_release != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download IPA artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: RenPlay-ipa
+          path: dist
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          TAG="${{ github.event.inputs.app_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="v1.0.0-${SHORT_SHA}"
+          fi
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "RenPlay $TAG" \
+            --notes "Unsigned RenPlay iOS IPA (built from commit \`$SHORT_SHA\`) bundling multi-version Ren'Py engine frameworks (7.8.7, 8.3.7, 8.4.1, 8.5.3, 8.6.1)." \
+            dist/RenPlay.ipa

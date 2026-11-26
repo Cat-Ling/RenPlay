@@ -167,15 +167,30 @@ FW_DIR="$OUT_DIR/frameworks/${FW_NAME}.framework"
 rm -rf "$FW_DIR"
 mkdir -p "$FW_DIR"
 
-METALANGLE_PARENT="$(dirname "$METALANGLE_SRC")"
+# Ensure MetalANGLE binary contains arm64 and thin universal device slices if lipo is available
+METALANGLE_OUT="$OUT_DIR/frameworks/MetalANGLE.framework"
+rm -rf "$METALANGLE_OUT"
+cp -R "$METALANGLE_SRC" "$METALANGLE_OUT"
+if lipo -info "$METALANGLE_OUT/MetalANGLE" 2>/dev/null | grep -q "Architectures in the fat file"; then
+    lipo "$METALANGLE_OUT/MetalANGLE" -thin arm64 -output "$METALANGLE_OUT/MetalANGLE.arm64"
+    mv "$METALANGLE_OUT/MetalANGLE.arm64" "$METALANGLE_OUT/MetalANGLE"
+fi
+
+# Collect undefined-symbol hints so SDL input helpers are exported when present in libSDL
+SDL_EXPORT_FLAGS=("-Wl,-u,_launcher_main")
+for sym in _SDL_PushEvent _SDL_StartTextInput _SDL_StopTextInput _SDL_GetKeyboardFocus; do
+    if nm -g "$PREBUILT_DIR"/libSDL*.a 2>/dev/null | grep -q " T ${sym}$"; then
+        SDL_EXPORT_FLAGS+=("-Wl,-u,${sym}")
+    fi
+done
 
 EXTRA_SYS_FRAMEWORKS=()
 if [ -d "$IOS_SDK/System/Library/Frameworks/DeclaredAgeRange.framework" ]; then
     EXTRA_SYS_FRAMEWORKS+=("-weak_framework" "DeclaredAgeRange")
 fi
 
-# Link the dynamic framework. Force-load librenpython and librenpy so launcher_main and all
-# PyInit_* modules in librenpy_inittab are exported and preserved.
+# Link the dynamic framework without -force_load (avoids duplicate archive members in upstream librenpy.a).
+# Pulling _launcher_main brings in _init_librenpy and the full PyInit_* inittab.
 "$CLANG" -dynamiclib \
     -arch arm64 \
     -isysroot "$IOS_SDK" \
@@ -183,11 +198,12 @@ fi
     -install_name "@rpath/${FW_NAME}.framework/${FW_NAME}" \
     -Wl,-rpath,@loader_path/.. \
     -Wl,-rpath,@executable_path/Frameworks \
-    -F "$METALANGLE_PARENT" \
+    -F "$(dirname "$METALANGLE_OUT")" \
     -L "$PREBUILT_DIR" \
     "$WORK_DIR/renplay_entry.o" \
-    -Wl,-force_load,"$PREBUILT_DIR/librenpython.a" \
-    -Wl,-force_load,"$PREBUILT_DIR/librenpy.a" \
+    "${SDL_EXPORT_FLAGS[@]}" \
+    -lrenpython \
+    -lrenpy \
     "${LINKER_LIBS[@]}" \
     -framework MetalANGLE \
     -framework UIKit \
@@ -247,11 +263,13 @@ cat > "$FW_DIR/Info.plist" << EOF
     </array>
     <key>UIRequiredDeviceCapabilities</key>
     <array>
-        <string>arm64</integer>
+        <string>arm64</string>
     </array>
 </dict>
 </plist>
 EOF
+
+plutil -lint "$FW_DIR/Info.plist"
 
 echo "=== Verification: otool -L ${FW_NAME} ==="
 otool -L "$FW_DIR/$FW_NAME"
@@ -266,13 +284,8 @@ if ! nm -gU "$FW_DIR/$FW_NAME" | grep -q '_renplay_launch'; then
     exit 1
 fi
 
-# Package framework zip
+# Package framework zip and already-thinned MetalANGLE.framework
 (cd "$OUT_DIR/frameworks" && zip -q -r -y "renpy-${VER}-framework.zip" "${FW_NAME}.framework")
-
-# Copy MetalANGLE.framework once (normalized Info.plist + arm64 binary)
-METALANGLE_OUT="$OUT_DIR/frameworks/MetalANGLE.framework"
-rm -rf "$METALANGLE_OUT"
-cp -R "$METALANGLE_SRC" "$METALANGLE_OUT"
 (cd "$OUT_DIR/frameworks" && zip -q -r -y "MetalANGLE.framework.zip" "MetalANGLE.framework")
 
 # Assemble Python runtime pack: base/main.py, base/renpy/, base/lib/
@@ -297,10 +310,7 @@ fi
 echo "Engine base/lib contents:"
 ls -la "$STAGE/base/lib"
 
-# Remove desktop/build bloat from base/renpy to keep IPA lean
-find "$STAGE/base" -name "*.pyc" -o -name "*.pyo" >/dev/null
 find "$STAGE/base" -name ".DS_Store" -delete
-find "$STAGE/base/renpy" -name "*.rpy" -delete 2>/dev/null || true
 
 printf '%s\n' "$VER" > "$STAGE/base/script_version.txt"
 

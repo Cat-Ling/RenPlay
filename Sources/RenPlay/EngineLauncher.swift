@@ -80,7 +80,8 @@ public final class EngineLauncher {
             }
             statusUpdate("Unpacking Ren'Py \(engine.version) runtime...")
             try await Task.detached(priority: .userInitiated) {
-                try? fm.removeItem(at: engineRoot)
+                let localFM = FileManager.default
+                try? localFM.removeItem(at: engineRoot)
                 try ArchiveExtractor.extractZip(at: zipURL, to: engineRoot)
                 try Data("ok".utf8).write(to: markerURL, options: .atomic)
             }.value
@@ -160,7 +161,8 @@ public final class EngineLauncher {
         }
 
         if rc != 0 {
-            let msg = String(cString: errBuf)
+            let utf8Bytes = errBuf.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
+            let msg = String(decoding: utf8Bytes, as: UTF8.self)
             if !msg.isEmpty {
                 throw LaunchError.engineFailure(msg)
             }

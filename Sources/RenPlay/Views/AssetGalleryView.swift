@@ -162,6 +162,8 @@ struct AssetGalleryView: View {
     private func scanAssets() async {
         let dir = gameDir
         let found = await Task.detached(priority: .userInitiated) {
+            let imageExts: Set<String> = ["png", "jpg", "jpeg", "webp"]
+            let audioExts: Set<String> = ["mp3", "ogg", "wav", "m4a", "aac"]
             var collected: [AssetItem] = []
             let fm = FileManager.default
             let scanRoot = dir.appendingPathComponent("game")
@@ -174,16 +176,16 @@ struct AssetGalleryView: View {
                         if let archive = try? RPAArchive(fileURL: url) {
                             for entry in archive.listEntries() {
                                 let eExt = URL(fileURLWithPath: entry).pathExtension.lowercased()
-                                if Self.imageExtensions.contains(eExt) {
+                                if imageExts.contains(eExt) {
                                     collected.append(AssetItem(id: "rpa:\(url.lastPathComponent):\(entry)", name: entry, kind: .image, source: .rpa(archiveURL: url, entryPath: entry)))
-                                } else if Self.audioExtensions.contains(eExt) {
+                                } else if audioExts.contains(eExt) {
                                     collected.append(AssetItem(id: "rpa:\(url.lastPathComponent):\(entry)", name: entry, kind: .audio, source: .rpa(archiveURL: url, entryPath: entry)))
                                 }
                             }
                         }
-                    } else if Self.imageExtensions.contains(ext) {
+                    } else if imageExts.contains(ext) {
                         collected.append(AssetItem(id: "file:\(url.path)", name: url.lastPathComponent, kind: .image, source: .loose(url)))
-                    } else if Self.audioExtensions.contains(ext) {
+                    } else if audioExts.contains(ext) {
                         collected.append(AssetItem(id: "file:\(url.path)", name: url.lastPathComponent, kind: .audio, source: .loose(url)))
                     }
                     if collected.count >= 500 { break }
