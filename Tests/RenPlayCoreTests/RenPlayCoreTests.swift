@@ -561,6 +561,117 @@ struct SaveAndLibraryTests {
         #expect(!FileManager.default.fileExists(atPath: store.backupDirectory(for: reimported).path))
         #expect(store.listOrphanedSaveGroups().isEmpty)
     }
+
+    @Test("Decodes legacy library.json and settings.json schemas with new field defaults")
+    func legacyCodableCompatibility() throws {
+        let legacyGamesJSON = """
+        [
+          {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "displayName": "Legacy Novel",
+            "folderName": "LegacyNovel",
+            "importedAt": "2026-01-01T00:00:00Z",
+            "playTimeSeconds": 600,
+            "settings": {
+              "orientation": "landscape",
+              "allowNetwork": false,
+              "developerMode": true,
+              "forceRollback": true,
+              "forceSkip": true,
+              "lowMemoryMode": false,
+              "engineMode": { "auto": {} }
+            }
+          }
+        ]
+        """
+        let legacySettingsJSON = """
+        {
+          "defaultEngineStrategy": "accurate",
+          "autoBackupCount": 3,
+          "showOverlayByDefault": true,
+          "overlayOpacity": 0.9,
+          "globalAllowNetwork": false
+        }
+        """
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decodedGames = try decoder.decode([GameEntry].self, from: Data(legacyGamesJSON.utf8))
+        #expect(decodedGames.count == 1)
+        #expect(decodedGames[0].settings.useGlobalSettings == true)
+        #expect(decodedGames[0].settings.developerMode == true)
+        #expect(decodedGames[0].category == nil)
+
+        let decodedSettings = try decoder.decode(AppSettings.self, from: Data(legacySettingsJSON.utf8))
+        #expect(decodedSettings.libraryLayoutMode == .list)
+        #expect(decodedSettings.renpyMasterVolume == 1.0)
+        #expect(decodedSettings.autoBackupCount == 3)
+    }
+
+    @Test("Extracts options.rpy version, assigns readable save folders, relinks, renames, backs up all, and reconciles stats")
+    func metadataFoldersRelinkAndStats() throws {
+        let rootDir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+        let srcParent = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: srcParent) }
+
+        let src = srcParent.appendingPathComponent("MyNovel", isDirectory: true)
+        let gameDir = src.appendingPathComponent("game", isDirectory: true)
+        try FileManager.default.createDirectory(at: gameDir, withIntermediateDirectories: true)
+        try """
+        define config.version = "2.4.1"
+        define config.save_directory = "MyNovel-1700000000"
+        """.write(to: gameDir.appendingPathComponent("options.rpy"), atomically: true, encoding: .utf8)
+        try "label start:\n    \"Hi\"\n".write(to: gameDir.appendingPathComponent("script.rpy"), atomically: true, encoding: .utf8)
+
+        let store = LibraryStore(rootDir: rootDir)
+        let entry = try store.importGameFolder(from: src)
+        #expect(entry.gameVersion == "2.4.1")
+        #expect(entry.saveIdentifier == "MyNovel")
+        #expect((entry.sizeBytes ?? 0) > 0)
+
+        let customID = try store.createSaveFolder(named: "CustomSlot")
+        try ArchiveExtractor.createZip(
+            fromFiles: [("extra_info", Data("Act 2".utf8))],
+            to: store.saveDirectory(forIdentifier: customID).appendingPathComponent("1-1.save")
+        )
+        let relinked = try store.linkGame(entry.id, toSaveFolder: customID)
+        #expect(relinked.saveIdentifier == "CustomSlot")
+
+        let renamedID = try store.renameSaveFolder(from: customID, to: "RenamedSlot")
+        #expect(renamedID == "RenamedSlot")
+        #expect(store.loadGames().first?.saveIdentifier == "RenamedSlot")
+
+        let mpSource = srcParent.appendingPathComponent("AGMPV")
+        try Data("MP".utf8).write(to: mpSource)
+        try store.importSharedPersistentFile(from: mpSource)
+        #expect(store.listSharedPersistentItems().count == 1)
+
+        let bulkZip = rootDir.appendingPathComponent("Exports/all.zip")
+        let archivedCount = try store.backupAllSavesZip(to: bulkZip)
+        #expect(archivedCount == 2)
+        let entries = try ArchiveExtractor.listZipEntries(at: bulkZip).map(\.name)
+        #expect(entries.contains("RenamedSlot/1-1.save"))
+        #expect(entries.contains("_multipersistent/AGMPV"))
+
+        let statsPayload = """
+        {"sessionId":"s1","elapsedSeconds":125.0,"seenBlocks":330,"totalBlocks":500}
+        """
+        try statsPayload.write(
+            to: store.saveDirectory(forIdentifier: "RenamedSlot").appendingPathComponent(".renplay_stats.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let afterFirstSync = try store.syncWithDisk()
+        #expect(afterFirstSync.first?.playTimeSeconds == 125.0)
+        #expect(afterFirstSync.first?.dialogueSeenCount == 330)
+        #expect(afterFirstSync.first?.dialogueTotalCount == 500)
+        #expect(afterFirstSync.first?.dialogueProgressFraction == 0.66)
+
+        // Second sync with the same sessionId/elapsedSeconds must be idempotent.
+        let afterSecondSync = try store.syncWithDisk()
+        #expect(afterSecondSync.first?.playTimeSeconds == 125.0)
+    }
 }
 
 @Suite("SMB Streaming & Manifest Tests")

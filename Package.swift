@@ -83,7 +83,10 @@ let package = Package(
         ),
         .target(
             name: "RenPlay",
-            dependencies: ["RenPlayCore", "CRenPlayBridge"]
+            dependencies: ["RenPlayCore", "CRenPlayBridge"],
+            linkerSettings: [
+                .linkedFramework("PhotosUI", .when(platforms: [.iOS])),
+            ]
         ),
         .testTarget(
             name: "RenPlayCoreTests",

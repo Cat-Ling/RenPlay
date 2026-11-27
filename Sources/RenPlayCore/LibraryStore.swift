@@ -6,13 +6,34 @@ import Foundation
 public enum SaveRetentionError: Error, LocalizedError, Sendable {
     case invalidIdentifier(String)
     case attachedToGame(String)
+    case folderAlreadyExists(String)
+    case folderNotFound(String)
+    case gameNotFound
 
     public var errorDescription: String? {
         switch self {
         case .invalidIdentifier(let id):
-            return "Invalid save folder name: \(id)"
+            return "Invalid folder name: \(id)"
         case .attachedToGame(let id):
             return "Save folder \(id) belongs to a game that is still in the library."
+        case .folderAlreadyExists(let name):
+            return "A folder named \(name) already exists."
+        case .folderNotFound(let name):
+            return "Save folder \(name) could not be found."
+        case .gameNotFound:
+            return "The selected game is no longer in the library."
+        }
+    }
+}
+
+public enum CustomArtworkKind: Sendable {
+    case cover
+    case hero
+
+    var fileName: String {
+        switch self {
+        case .cover: return ".renplay_custom_cover.png"
+        case .hero: return ".renplay_custom_hero.png"
         }
     }
 }
@@ -25,6 +46,7 @@ public final class LibraryStore: @unchecked Sendable {
     public let logsDir: URL
     public let importDropzoneDir: URL
     public let exportsDir: URL
+    public var multipersistentDir: URL { savesDir.appendingPathComponent("_multipersistent", isDirectory: true) }
     private let libraryFileURL: URL
     private let settingsFileURL: URL
     private let smbServersFileURL: URL
@@ -67,7 +89,7 @@ public final class LibraryStore: @unchecked Sendable {
 
     public func ensureDirectories() {
         let fm = FileManager.default
-        for dir in [rootDir, gamesDir, savesDir, backupsDir, logsDir, importDropzoneDir, exportsDir] {
+        for dir in [rootDir, gamesDir, savesDir, multipersistentDir, backupsDir, logsDir, importDropzoneDir, exportsDir] {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
     }
@@ -210,7 +232,9 @@ public final class LibraryStore: @unchecked Sendable {
                 progress: progress
             )
             let detected = RenPyVersionDetector.detectVersion(in: localDir)
+            let gameVer = RenPyVersionDetector.parseGameVersion(in: localDir)
             let cover = extractCoverIfNeeded(in: localDir)
+            let totalSize = computeGameSizeBytes(in: localDir, isRemote: true)
             let source = SMBGameSource(
                 serverID: server.id,
                 host: server.host,
@@ -227,7 +251,9 @@ public final class LibraryStore: @unchecked Sendable {
                 folderName: folderName,
                 detectedEngineVersion: detected?.libraryLabel,
                 coverRelativePath: cover,
-                remoteSource: source
+                remoteSource: source,
+                gameVersion: gameVer,
+                sizeBytes: totalSize
             )
             var games = loadGames()
             adoptKeptSaves(for: &entry, gameRoot: localDir, existing: games)
@@ -271,6 +297,10 @@ public final class LibraryStore: @unchecked Sendable {
 
         var updated = game
         updated.detectedEngineVersion = detected?.libraryLabel
+        if updated.gameVersion == nil {
+            updated.gameVersion = RenPyVersionDetector.parseGameVersion(in: localDir)
+        }
+        updated.sizeBytes = computeGameSizeBytes(in: localDir, isRemote: true)
         updated.coverRelativePath = cover
         updated.remoteSource = SMBGameSource(
             serverID: source.serverID,
@@ -308,20 +338,34 @@ public final class LibraryStore: @unchecked Sendable {
 
             if !existingFolders.contains(folder) {
                 let detected = RenPyVersionDetector.detectVersion(in: dir)
+                let gameVer = RenPyVersionDetector.parseGameVersion(in: dir)
                 let cover = extractCoverIfNeeded(in: dir)
+                let size = computeGameSizeBytes(in: dir, isRemote: false)
                 var entry = GameEntry(
                     displayName: folder,
                     folderName: folder,
                     detectedEngineVersion: detected?.libraryLabel,
-                    coverRelativePath: cover
+                    coverRelativePath: cover,
+                    gameVersion: gameVer,
+                    sizeBytes: size
                 )
                 adoptKeptSaves(for: &entry, gameRoot: dir, existing: games)
                 games.append(entry)
             }
         }
 
-        for idx in games.indices where games[idx].detectedEngineVersion == nil && presentFolderNames.contains(games[idx].folderName) {
-            games[idx].detectedEngineVersion = RenPyVersionDetector.detectVersion(in: gameDirectory(for: games[idx]))?.libraryLabel
+        for idx in games.indices where presentFolderNames.contains(games[idx].folderName) {
+            let gDir = gameDirectory(for: games[idx])
+            if games[idx].detectedEngineVersion == nil {
+                games[idx].detectedEngineVersion = RenPyVersionDetector.detectVersion(in: gDir)?.libraryLabel
+            }
+            if games[idx].gameVersion == nil {
+                games[idx].gameVersion = RenPyVersionDetector.parseGameVersion(in: gDir)
+            }
+            if games[idx].sizeBytes == nil {
+                games[idx].sizeBytes = computeGameSizeBytes(in: gDir, isRemote: games[idx].remoteSource != nil)
+            }
+            reconcileSessionStats(for: &games[idx])
         }
 
         for game in games where !presentFolderNames.contains(game.folderName) {
@@ -356,12 +400,16 @@ public final class LibraryStore: @unchecked Sendable {
         try fm.moveItem(at: gameRoot, to: finalDir)
 
         let detected = RenPyVersionDetector.detectVersion(in: finalDir)
+        let gameVer = RenPyVersionDetector.parseGameVersion(in: finalDir)
         let cover = extractCoverIfNeeded(in: finalDir)
+        let size = computeGameSizeBytes(in: finalDir, isRemote: false)
         var entry = GameEntry(
             displayName: rawTitle,
             folderName: folderName,
             detectedEngineVersion: detected?.libraryLabel,
-            coverRelativePath: cover
+            coverRelativePath: cover,
+            gameVersion: gameVer,
+            sizeBytes: size
         )
 
         var games = loadGames()
@@ -381,12 +429,16 @@ public final class LibraryStore: @unchecked Sendable {
         try copyDirectoryResilient(from: gameRoot, to: finalDir)
 
         let detected = RenPyVersionDetector.detectVersion(in: finalDir)
+        let gameVer = RenPyVersionDetector.parseGameVersion(in: finalDir)
         let cover = extractCoverIfNeeded(in: finalDir)
+        let size = computeGameSizeBytes(in: finalDir, isRemote: false)
         var entry = GameEntry(
             displayName: rawTitle,
             folderName: folderName,
             detectedEngineVersion: detected?.libraryLabel,
-            coverRelativePath: cover
+            coverRelativePath: cover,
+            gameVersion: gameVer,
+            sizeBytes: size
         )
 
         var games = loadGames()
@@ -540,37 +592,389 @@ public final class LibraryStore: @unchecked Sendable {
         var groups: [OrphanedSaveGroup] = []
         for dir in dirs {
             let id = dir.lastPathComponent
-            guard !attached.contains(id),
+            guard !id.hasPrefix("_"),
+                  !attached.contains(id),
                   (try? dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
 
-            let saveFiles = ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? [])
-                .filter {
-                    let lower = $0.lastPathComponent.lowercased()
-                    return lower.hasSuffix(".save") || lower == "persistent"
-                }
-            let backupZips = ((try? fm.contentsOfDirectory(at: backupDirectory(forIdentifier: id), includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? [])
-                .filter { $0.pathExtension.lowercased() == "zip" }
+            let saveFiles = saveFilesInDirectory(dir)
+            let backupZips = backupFilesInDirectory(backupDirectory(forIdentifier: id))
             guard !saveFiles.isEmpty || !backupZips.isEmpty else { continue }
 
             let newest = (saveFiles + backupZips)
                 .compactMap { try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }
                 .max() ?? Date.distantPast
-            let name = readSaveMeta(in: dir)?.displayName ?? "Removed game (\(id.prefix(8)))"
+            let name = readSaveMeta(in: dir)?.displayName ?? (UUID(uuidString: id) == nil ? id : "Removed game (\(id.prefix(8)))")
             groups.append(OrphanedSaveGroup(id: id, displayName: name, slotCount: saveFiles.count, modifiedAt: newest))
         }
         return groups.sorted { $0.modifiedAt > $1.modifiedAt }
     }
 
     public func deleteOrphanedSaveGroup(id: String) throws {
-        guard !id.isEmpty, !id.contains("/"), id != ".", id != ".." else {
-            throw SaveRetentionError.invalidIdentifier(id)
-        }
+        try validateSaveIdentifier(id)
         guard !attachedSaveIdentifiers(loadGames()).contains(id) else {
             throw SaveRetentionError.attachedToGame(id)
         }
         let fm = FileManager.default
         try? fm.removeItem(at: backupDirectory(forIdentifier: id))
         try fm.removeItem(at: saveDirectory(forIdentifier: id))
+    }
+
+    public func listAllSaveFolders() -> [SaveFolderSummary] {
+        ensureDirectories()
+        let fm = FileManager.default
+        let games = loadGames()
+        var byIdentifier: [String: GameEntry] = [:]
+        for g in games {
+            let key = g.saveIdentifier ?? g.id.uuidString
+            if byIdentifier[key] == nil {
+                byIdentifier[key] = g
+            }
+        }
+
+        let dirs = (try? fm.contentsOfDirectory(at: savesDir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+        var summaries: [SaveFolderSummary] = []
+        var seen = Set<String>()
+
+        for dir in dirs {
+            let id = dir.lastPathComponent
+            guard !id.hasPrefix("_"),
+                  (try? dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+            seen.insert(id)
+            let linked = byIdentifier[id]
+            let files = saveFilesInDirectory(dir)
+            // Unlinked empty folders with no backups are stale artifacts unless explicitly created with meta.
+            if linked == nil && files.isEmpty && backupFilesInDirectory(backupDirectory(forIdentifier: id)).isEmpty && readSaveMeta(in: dir) == nil {
+                continue
+            }
+            let bytes = directoryFileBytes(dir)
+            let newest = files.compactMap { try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }.max() ?? Date.distantPast
+            let display = linked?.displayName ?? readSaveMeta(in: dir)?.displayName ?? id
+            summaries.append(SaveFolderSummary(
+                id: id,
+                displayName: display,
+                slotCount: files.count,
+                sizeBytes: bytes,
+                modifiedAt: newest,
+                linkedGameID: linked?.id,
+                linkedGameTitle: linked?.displayName
+            ))
+        }
+
+        // Surface linked games whose save folder has not been created yet so users can still inspect/relink them.
+        for g in games {
+            let id = g.saveIdentifier ?? g.id.uuidString
+            if !seen.contains(id) {
+                summaries.append(SaveFolderSummary(
+                    id: id,
+                    displayName: g.displayName,
+                    slotCount: 0,
+                    sizeBytes: 0,
+                    modifiedAt: g.lastPlayedAt ?? g.importedAt,
+                    linkedGameID: g.id,
+                    linkedGameTitle: g.displayName
+                ))
+            }
+        }
+
+        return summaries.sorted { $0.id.localizedCaseInsensitiveCompare($1.id) == .orderedAscending }
+    }
+
+    public func createSaveFolder(named rawName: String) throws -> String {
+        ensureDirectories()
+        let cleaned = sanitizeFolderName(rawName)
+        guard !cleaned.isEmpty, !cleaned.hasPrefix("_"), !cleaned.hasPrefix(".") else {
+            throw SaveRetentionError.invalidIdentifier(rawName)
+        }
+        let target = saveDirectory(forIdentifier: cleaned)
+        if FileManager.default.fileExists(atPath: target.path) {
+            throw SaveRetentionError.folderAlreadyExists(cleaned)
+        }
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        let meta = SaveMeta(displayName: cleaned, saveKey: "manual:\(cleaned)", updatedAt: Date())
+        if let data = try? encoder.encode(meta) {
+            try? data.write(to: target.appendingPathComponent(Self.saveMetaFileName), options: .atomic)
+        }
+        return cleaned
+    }
+
+    public func renameSaveFolder(from oldID: String, to rawNewName: String) throws -> String {
+        try validateSaveIdentifier(oldID)
+        let newID = sanitizeFolderName(rawNewName)
+        guard !newID.isEmpty, !newID.hasPrefix("_"), !newID.hasPrefix(".") else {
+            throw SaveRetentionError.invalidIdentifier(rawNewName)
+        }
+        if newID == oldID { return oldID }
+
+        let fm = FileManager.default
+        let oldSave = saveDirectory(forIdentifier: oldID)
+        let newSave = saveDirectory(forIdentifier: newID)
+        guard fm.fileExists(atPath: oldSave.path) else {
+            throw SaveRetentionError.folderNotFound(oldID)
+        }
+        guard !fm.fileExists(atPath: newSave.path) else {
+            throw SaveRetentionError.folderAlreadyExists(newID)
+        }
+
+        try fm.moveItem(at: oldSave, to: newSave)
+        let oldBackup = backupDirectory(forIdentifier: oldID)
+        let newBackup = backupDirectory(forIdentifier: newID)
+        if fm.fileExists(atPath: oldBackup.path), !fm.fileExists(atPath: newBackup.path) {
+            try? fm.moveItem(at: oldBackup, to: newBackup)
+        }
+
+        var games = loadGames()
+        var touched = false
+        for idx in games.indices where (games[idx].saveIdentifier ?? games[idx].id.uuidString) == oldID {
+            games[idx].saveIdentifier = newID
+            touched = true
+        }
+        if touched {
+            try saveGames(games)
+        }
+        return newID
+    }
+
+    @discardableResult
+    public func linkGame(_ gameID: UUID, toSaveFolder folderID: String) throws -> GameEntry {
+        try validateSaveIdentifier(folderID)
+        let fm = FileManager.default
+        let dir = saveDirectory(forIdentifier: folderID)
+        if !fm.fileExists(atPath: dir.path) {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        var games = loadGames()
+        guard let idx = games.firstIndex(where: { $0.id == gameID }) else {
+            throw SaveRetentionError.gameNotFound
+        }
+        games[idx].saveIdentifier = folderID
+        let updated = games[idx]
+        try saveGames(games)
+        let key = saveKey(forGameRoot: gameDirectory(for: updated), displayName: updated.displayName, remoteSource: updated.remoteSource)
+        writeSaveMeta(for: updated, saveKey: key)
+        return updated
+    }
+
+    public func listSharedPersistentItems() -> [SharedPersistentItem] {
+        ensureDirectories()
+        let fm = FileManager.default
+        let items = (try? fm.contentsOfDirectory(
+            at: multipersistentDir,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        return items.compactMap { url -> SharedPersistentItem? in
+            let vals = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey])
+            guard vals?.isRegularFile == true else { return nil }
+            return SharedPersistentItem(
+                filename: url.lastPathComponent,
+                sizeBytes: Int64(vals?.fileSize ?? 0),
+                modifiedAt: vals?.contentModificationDate ?? Date.distantPast
+            )
+        }.sorted { $0.filename.localizedCaseInsensitiveCompare($1.filename) == .orderedAscending }
+    }
+
+    public func importSharedPersistentFile(from sourceURL: URL) throws {
+        ensureDirectories()
+        let name = sanitizeFolderName(sourceURL.lastPathComponent)
+        let dst = multipersistentDir.appendingPathComponent(name)
+        let fm = FileManager.default
+        if fm.fileExists(atPath: dst.path) {
+            try fm.removeItem(at: dst)
+        }
+        try fm.copyItem(at: sourceURL, to: dst)
+    }
+
+    public func deleteSharedPersistentItem(named filename: String) throws {
+        try validateSaveIdentifier(filename)
+        try FileManager.default.removeItem(at: multipersistentDir.appendingPathComponent(filename))
+    }
+
+    @discardableResult
+    public func backupAllSavesZip(to destinationZipURL: URL) throws -> Int {
+        ensureDirectories()
+        let fm = FileManager.default
+        var payload: [(String, Data)] = []
+
+        let dirs = (try? fm.contentsOfDirectory(at: savesDir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+        for dir in dirs {
+            let folder = dir.lastPathComponent
+            guard (try? dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+            if folder == "_multipersistent" {
+                let mpFiles = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])) ?? []
+                for file in mpFiles {
+                    if let data = try? Data(contentsOf: file) {
+                        payload.append(("_multipersistent/\(file.lastPathComponent)", data))
+                    }
+                }
+            } else {
+                for file in saveFilesInDirectory(dir) {
+                    if let data = try? Data(contentsOf: file) {
+                        payload.append(("\(folder)/\(file.lastPathComponent)", data))
+                    }
+                }
+            }
+        }
+        try ArchiveExtractor.createZip(fromFiles: payload, to: destinationZipURL)
+        return payload.count
+    }
+
+    public func renameGameDirectory(_ game: GameEntry, to rawNewFolder: String) throws -> GameEntry {
+        let newFolder = sanitizeFolderName(rawNewFolder)
+        if newFolder == game.folderName { return game }
+        let fm = FileManager.default
+        let oldURL = gameDirectory(for: game)
+        let newURL = gamesDir.appendingPathComponent(newFolder, isDirectory: true)
+        guard !fm.fileExists(atPath: newURL.path) else {
+            throw SaveRetentionError.folderAlreadyExists(newFolder)
+        }
+        try fm.moveItem(at: oldURL, to: newURL)
+        var games = loadGames()
+        guard let idx = games.firstIndex(where: { $0.id == game.id }) else {
+            throw SaveRetentionError.gameNotFound
+        }
+        games[idx].folderName = newFolder
+        let updated = games[idx]
+        try saveGames(games)
+        return updated
+    }
+
+    public func setCustomArtwork(data: Data, kind: CustomArtworkKind, for game: GameEntry) throws -> GameEntry {
+        let dir = gameDirectory(for: game)
+        let dest = dir.appendingPathComponent(kind.fileName)
+        try data.write(to: dest, options: .atomic)
+        var games = loadGames()
+        guard let idx = games.firstIndex(where: { $0.id == game.id }) else {
+            throw SaveRetentionError.gameNotFound
+        }
+        switch kind {
+        case .cover: games[idx].customCoverPath = kind.fileName
+        case .hero: games[idx].customHeroPath = kind.fileName
+        }
+        let updated = games[idx]
+        try saveGames(games)
+        return updated
+    }
+
+    public func clearCustomArtwork(kind: CustomArtworkKind, for game: GameEntry) throws -> GameEntry {
+        let dir = gameDirectory(for: game)
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent(kind.fileName))
+        var games = loadGames()
+        guard let idx = games.firstIndex(where: { $0.id == game.id }) else {
+            throw SaveRetentionError.gameNotFound
+        }
+        switch kind {
+        case .cover: games[idx].customCoverPath = nil
+        case .hero: games[idx].customHeroPath = nil
+        }
+        let updated = games[idx]
+        try saveGames(games)
+        return updated
+    }
+
+    public func computeStorageBreakdown(engineCacheBytes: Int64) -> StorageBreakdown {
+        let games = loadGames()
+        var usages: [StorageBreakdown.GameUsage] = []
+        var gamesTotal: Int64 = 0
+        for g in games {
+            let localBytes = directoryFileBytes(gameDirectory(for: g))
+            gamesTotal += localBytes
+            usages.append(StorageBreakdown.GameUsage(
+                title: g.displayName,
+                isRemote: g.remoteSource != nil,
+                bytes: localBytes,
+                game: g
+            ))
+        }
+        usages.sort { $0.bytes > $1.bytes }
+        return StorageBreakdown(
+            games: usages,
+            totalGamesBytes: gamesTotal,
+            savesBytes: directoryFileBytes(savesDir),
+            backupsBytes: directoryFileBytes(backupsDir),
+            exportsBytes: directoryFileBytes(exportsDir),
+            engineCacheBytes: engineCacheBytes
+        )
+    }
+
+    public func clearExports() throws {
+        let fm = FileManager.default
+        let items = (try? fm.contentsOfDirectory(at: exportsDir, includingPropertiesForKeys: nil)) ?? []
+        for item in items {
+            try? fm.removeItem(at: item)
+        }
+    }
+
+    public func reconcileSessionStats(for game: inout GameEntry) {
+        let saveDir = saveDirectory(for: game)
+        let statsURL = saveDir.appendingPathComponent(Self.statsFileName)
+        guard let data = try? Data(contentsOf: statsURL),
+              let stats = try? decoder.decode(SessionStatsPayload.self, from: data) else {
+            return
+        }
+        if stats.totalBlocks > 0 {
+            game.dialogueSeenCount = stats.seenBlocks
+            game.dialogueTotalCount = stats.totalBlocks
+        }
+        let appliedURL = saveDir.appendingPathComponent(Self.statsAppliedFileName)
+        var applied = (try? Data(contentsOf: appliedURL)).flatMap {
+            try? decoder.decode(AppliedSessionStats.self, from: $0)
+        }
+        let delta: TimeInterval
+        if let prev = applied, prev.sessionId == stats.sessionId {
+            delta = max(0, stats.elapsedSeconds - prev.appliedSeconds)
+        } else {
+            delta = max(0, stats.elapsedSeconds)
+        }
+        if delta > 0 {
+            game.playTimeSeconds += delta
+        }
+        applied = AppliedSessionStats(sessionId: stats.sessionId, appliedSeconds: max(0, stats.elapsedSeconds))
+        if let out = try? encoder.encode(applied) {
+            try? out.write(to: appliedURL, options: .atomic)
+        }
+    }
+
+    private func validateSaveIdentifier(_ id: String) throws {
+        guard !id.isEmpty, !id.contains("/"), id != ".", id != "..", !id.hasPrefix("_") else {
+            throw SaveRetentionError.invalidIdentifier(id)
+        }
+    }
+
+    private func saveFilesInDirectory(_ dir: URL) -> [URL] {
+        ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? [])
+            .filter {
+                let lower = $0.lastPathComponent.lowercased()
+                return lower.hasSuffix(".save") || lower == "persistent"
+            }
+    }
+
+    private func backupFilesInDirectory(_ dir: URL) -> [URL] {
+        ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? [])
+            .filter { $0.pathExtension.lowercased() == "zip" }
+    }
+
+    private func directoryFileBytes(_ dir: URL) -> Int64 {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]) else {
+            return 0
+        }
+        var total: Int64 = 0
+        while let url = enumerator.nextObject() as? URL {
+            if let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+               vals.isRegularFile == true {
+                total += Int64(vals.fileSize ?? 0)
+            }
+        }
+        return total
+    }
+
+    private func computeGameSizeBytes(in gameRoot: URL, isRemote: Bool) -> Int64 {
+        let localBytes = directoryFileBytes(gameRoot)
+        if !isRemote { return localBytes }
+        let manifestURL = gameRoot.appendingPathComponent(SMBIndexManifest.manifestFileName)
+        guard let text = try? String(contentsOf: manifestURL, encoding: .utf8) else { return localBytes }
+        let remoteBytes = SMBIndexManifest.parse(text).entries.reduce(Int64(0)) { $0 + Int64($1.totalSize) }
+        return localBytes + remoteBytes
     }
 
     // Stable identity for a game's saves across remove/re-add, preferring the game's own save_directory.
@@ -594,6 +998,20 @@ public final class LibraryStore: @unchecked Sendable {
     }
 
     private static let saveMetaFileName = ".renplay_save_meta.json"
+    private static let statsFileName = ".renplay_stats.json"
+    private static let statsAppliedFileName = ".renplay_stats_applied.json"
+
+    private struct SessionStatsPayload: Codable {
+        var sessionId: String
+        var elapsedSeconds: Double
+        var seenBlocks: Int
+        var totalBlocks: Int
+    }
+
+    private struct AppliedSessionStats: Codable {
+        var sessionId: String
+        var appliedSeconds: Double
+    }
 
     private struct SaveMeta: Codable {
         var displayName: String
@@ -623,13 +1041,36 @@ public final class LibraryStore: @unchecked Sendable {
         let key = saveKey(forGameRoot: gameRoot, displayName: entry.displayName, remoteSource: entry.remoteSource)
         let attached = attachedSaveIdentifiers(existing)
         let dirs = (try? FileManager.default.contentsOfDirectory(at: savesDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
-        for dir in dirs where !attached.contains(dir.lastPathComponent) {
+        for dir in dirs where !attached.contains(dir.lastPathComponent) && !dir.lastPathComponent.hasPrefix("_") {
             if readSaveMeta(in: dir)?.saveKey == key {
                 entry.saveIdentifier = dir.lastPathComponent
                 break
             }
         }
+        if entry.saveIdentifier == nil {
+            let base = readableSaveFolderBase(gameRoot: gameRoot, displayName: entry.displayName)
+            var candidate = base
+            var suffix = 2
+            while attached.contains(candidate) || FileManager.default.fileExists(atPath: saveDirectory(forIdentifier: candidate).path) {
+                candidate = "\(base)-\(suffix)"
+                suffix += 1
+            }
+            entry.saveIdentifier = candidate
+        }
         writeSaveMeta(for: entry, saveKey: key)
+    }
+
+    private func readableSaveFolderBase(gameRoot: URL, displayName: String) -> String {
+        if let raw = RenPyVersionDetector.parseConfiguredSaveDirName(in: gameRoot) {
+            // Strip Ren'Py's trailing Unix timestamp suffix (e.g. "MyGame-1700000000") for clean folder names.
+            let stripped = raw.replacingOccurrences(of: #"-\d{8,}$"#, with: "", options: .regularExpression)
+            let cleaned = sanitizeFolderName(stripped.isEmpty ? raw : stripped)
+            if !cleaned.isEmpty && !cleaned.hasPrefix("_") {
+                return cleaned
+            }
+        }
+        let fromTitle = sanitizeFolderName(displayName)
+        return fromTitle.hasPrefix("_") ? "Game_\(fromTitle)" : fromTitle
     }
 
     @discardableResult
@@ -677,7 +1118,9 @@ public final class LibraryStore: @unchecked Sendable {
             displayName: "RenPlay Demo",
             folderName: folderName,
             detectedEngineVersion: "8.5.3",
-            coverRelativePath: nil
+            coverRelativePath: nil,
+            gameVersion: "1.0",
+            sizeBytes: computeGameSizeBytes(in: gameRoot, isRemote: false)
         )
         var games = loadGames()
         adoptKeptSaves(for: &entry, gameRoot: gameRoot, existing: games)

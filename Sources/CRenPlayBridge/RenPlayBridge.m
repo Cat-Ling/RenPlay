@@ -50,8 +50,29 @@ static atomic_int g_engine_wants_text_input = 0;
 static atomic_int g_kbd_user_hidden = 0;
 static atomic_int g_kbd_manual_open = 0;
 static int g_programmatic_hide = 0;
+static atomic_int g_preferred_orientation = 0;
+static atomic_int g_dialogue_seen = 0;
+static atomic_int g_dialogue_total = 0;
+
 static pthread_mutex_t g_key_queue_lock = PTHREAD_MUTEX_INITIALIZER;
 static NSMutableArray<NSString *> *g_key_queue = nil;
+
+typedef struct {
+    float normX;
+    float normY;
+    int button;
+    int eventType;
+} RenPlayMouseEvent;
+
+#define RENPLAY_MOUSE_RING_CAP 64
+static pthread_mutex_t g_mouse_lock = PTHREAD_MUTEX_INITIALIZER;
+static RenPlayMouseEvent g_mouse_ring[RENPLAY_MOUSE_RING_CAP];
+static int g_mouse_head = 0;
+static int g_mouse_tail = 0;
+
+static pthread_mutex_t g_rpc_lock = PTHREAD_MUTEX_INITIALIZER;
+static NSMutableArray<NSString *> *g_rpc_requests = nil;
+static NSMutableArray<NSString *> *g_rpc_replies = nil;
 
 static void renplay_set_keyboard_visible(BOOL show, BOOL userInitiated);
 
@@ -531,6 +552,10 @@ static UIViewController *renplay_find_presenter(UIWindow *window) {
 @end
 
 @interface RenPlayKeyboardField : UITextField <UITextFieldDelegate>
+@property (nonatomic, assign) BOOL ctrlLatched;
+@property (nonatomic, assign) BOOL altLatched;
+@property (nonatomic, strong) UIButton *ctrlBtn;
+@property (nonatomic, strong) UIButton *altBtn;
 - (void)resetToSentinel;
 @end
 
@@ -538,6 +563,33 @@ static NSString * const kRenPlaySentinel = @"\u200B";
 static RenPlayKeyboardField *g_kbd_field = nil;
 static id g_kbd_show_obs = nil;
 static id g_kbd_hide_obs = nil;
+
+static UIButton *renplay_make_kbd_pill(NSString *title, void (^handler)(UIButton *btn)) {
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration *cfg = [UIButtonConfiguration filledButtonConfiguration];
+    cfg.title = title;
+    cfg.baseBackgroundColor = [UIColor colorWithWhite:0.16 alpha:0.92];
+    cfg.baseForegroundColor = [UIColor whiteColor];
+    cfg.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+    cfg.background.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.22];
+    cfg.background.strokeWidth = 0.5;
+    cfg.contentInsets = NSDirectionalEdgeInsetsMake(6, 12, 6, 12);
+    cfg.titleTextAttributesTransformer = ^NSDictionary<NSAttributedStringKey, id> *(NSDictionary<NSAttributedStringKey, id> *incoming) {
+        NSMutableDictionary *copy = [incoming mutableCopy];
+        copy[NSFontAttributeName] = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+        return copy;
+    };
+    btn.configuration = cfg;
+    btn.translatesAutoresizingMaskIntoConstraints = NO;
+    __weak UIButton *weakBtn = btn;
+    [btn addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
+        (void)action;
+        if (weakBtn) {
+            handler(weakBtn);
+        }
+    }] forControlEvents:UIControlEventTouchUpInside];
+    return btn;
+}
 
 @implementation RenPlayKeyboardField
 
@@ -560,58 +612,66 @@ static id g_kbd_hide_obs = nil;
     self.tintColor = [UIColor clearColor];
     self.backgroundColor = [UIColor clearColor];
 
-    UIView *accessory = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 42)];
-    accessory.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.96];
+    UIView *accessory = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 46)];
+    accessory.backgroundColor = [UIColor clearColor];
     accessory.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 
-    UIView *hairline = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 0.5)];
-    hairline.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2];
-    hairline.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [accessory addSubview:hairline];
+    UIButton *escBtn = renplay_make_kbd_pill(@"Esc", ^(UIButton *b) {
+        (void)b;
+        renplay_enqueue_key_event(@"K:ESCAPE");
+    });
 
-    UIButton *hideBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    UIButtonConfiguration *hideCfg = [UIButtonConfiguration plainButtonConfiguration];
-    hideCfg.title = @"Hide Keyboard";
-    hideCfg.image = [UIImage systemImageNamed:@"keyboard.chevron.compact.down"];
-    hideCfg.imagePadding = 6;
-    hideCfg.baseForegroundColor = [UIColor whiteColor];
-    hideCfg.contentInsets = NSDirectionalEdgeInsetsMake(6, 10, 6, 10);
-    hideBtn.configuration = hideCfg;
-    hideBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [hideBtn addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
-        (void)action;
-        renplay_set_keyboard_visible(NO, YES);
-    }] forControlEvents:UIControlEventTouchUpInside];
+    __weak typeof(self) weakSelf = self;
+    self.ctrlBtn = renplay_make_kbd_pill(@"Ctrl", ^(UIButton *b) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf.ctrlLatched = !strongSelf.ctrlLatched;
+        [strongSelf updateModifierButton:b active:strongSelf.ctrlLatched];
+        renplay_enqueue_key_event(strongSelf.ctrlLatched ? @"M:CTRL:1" : @"M:CTRL:0");
+    });
+    self.altBtn = renplay_make_kbd_pill(@"Alt", ^(UIButton *b) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf.altLatched = !strongSelf.altLatched;
+        [strongSelf updateModifierButton:b active:strongSelf.altLatched];
+        renplay_enqueue_key_event(strongSelf.altLatched ? @"M:ALT:1" : @"M:ALT:0");
+    });
 
-    UIButton *enterBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    UIButtonConfiguration *enterCfg = [UIButtonConfiguration filledButtonConfiguration];
-    enterCfg.title = @"Enter";
-    enterCfg.image = [UIImage systemImageNamed:@"return"];
-    enterCfg.imagePadding = 5;
-    enterCfg.baseBackgroundColor = [UIColor systemBlueColor];
-    enterCfg.baseForegroundColor = [UIColor whiteColor];
-    enterCfg.cornerStyle = UIButtonConfigurationCornerStyleMedium;
-    enterCfg.contentInsets = NSDirectionalEdgeInsetsMake(5, 12, 5, 12);
-    enterBtn.configuration = enterCfg;
-    enterBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [enterBtn addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
-        (void)action;
+    UIButton *enterBtn = renplay_make_kbd_pill(@"Enter", ^(UIButton *b) {
+        (void)b;
         renplay_enqueue_key_event(@"K:RETURN");
-    }] forControlEvents:UIControlEventTouchUpInside];
+    });
 
-    [accessory addSubview:hideBtn];
-    [accessory addSubview:enterBtn];
+    UIButton *closeBtn = renplay_make_kbd_pill(@"Close", ^(UIButton *b) {
+        (void)b;
+        renplay_set_keyboard_visible(NO, YES);
+    });
+
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[
+        escBtn, self.ctrlBtn, self.altBtn, enterBtn, closeBtn
+    ]];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.distribution = UIStackViewDistributionEqualSpacing;
+    row.alignment = UIStackViewAlignmentCenter;
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+
+    [accessory addSubview:row];
     [NSLayoutConstraint activateConstraints:@[
-        [hideBtn.leadingAnchor constraintEqualToAnchor:accessory.safeAreaLayoutGuide.leadingAnchor constant:8],
-        [hideBtn.centerYAnchor constraintEqualToAnchor:accessory.centerYAnchor],
-        [enterBtn.trailingAnchor constraintEqualToAnchor:accessory.safeAreaLayoutGuide.trailingAnchor constant:-8],
-        [enterBtn.centerYAnchor constraintEqualToAnchor:accessory.centerYAnchor],
+        [row.leadingAnchor constraintEqualToAnchor:accessory.safeAreaLayoutGuide.leadingAnchor constant:14],
+        [row.trailingAnchor constraintEqualToAnchor:accessory.safeAreaLayoutGuide.trailingAnchor constant:-14],
+        [row.centerYAnchor constraintEqualToAnchor:accessory.centerYAnchor],
     ]];
     self.inputAccessoryView = accessory;
 
     [self addTarget:self action:@selector(handleEditingChanged) forControlEvents:UIControlEventEditingChanged];
     [self resetToSentinel];
     return self;
+}
+
+- (void)updateModifierButton:(UIButton *)btn active:(BOOL)active {
+    UIButtonConfiguration *cfg = btn.configuration;
+    cfg.baseBackgroundColor = active ? [UIColor systemBlueColor] : [UIColor colorWithWhite:0.16 alpha:0.92];
+    btn.configuration = cfg;
 }
 
 - (void)resetToSentinel {
@@ -951,6 +1011,10 @@ static const void * volatile g_renplay_symbol_anchors[] = {
     (const void *)&renplay_bridge_is_keyboard_shown,
     (const void *)&renplay_bridge_reopen_if_active,
     (const void *)&renplay_bridge_consume_key_event,
+    (const void *)&renplay_bridge_report_stats,
+    (const void *)&renplay_bridge_consume_mouse_event,
+    (const void *)&renplay_bridge_consume_rpc,
+    (const void *)&renplay_bridge_post_rpc_reply,
 };
 
 void renplay_install_sdl_scene_bridge(void) {
@@ -1016,13 +1080,21 @@ int renplay_launch_engine(
     const char *gameDir,
     const char *saveDir,
     const char *logDir,
+    const char *multipersistentDir,
     const char *variant,
     int sdlVersionHint,
     int allowNetwork,
     int devMode,
+    int enableConsole,
     int forceRollback,
     int forceSkip,
+    int forceUnseenSkip,
     int lessMemory,
+    int lessUpdates,
+    int transparentTextboxes,
+    int compatPatches,
+    int safeMode,
+    double masterVolume,
     char *errorBuf,
     size_t errorBufSize
 ) {
@@ -1039,14 +1111,32 @@ int renplay_launch_engine(
     setenv("RENPY_GAME_DIRECTORY", gameDir, 1);
     if (saveDir) setenv("RENPY_SAVE_DIRECTORY", saveDir, 1);
     if (logDir) setenv("RENPY_LOG_DIRECTORY", logDir, 1);
-    if (variant && variant[0] != '\0') setenv("RENPY_VARIANT", variant, 1);
+    if (multipersistentDir && multipersistentDir[0] != '\0') {
+        setenv("RENPY_MULTIPERSISTENT", multipersistentDir, 1);
+    } else {
+        unsetenv("RENPY_MULTIPERSISTENT");
+    }
+    if (variant && variant[0] != '\0') {
+        setenv("RENPY_VARIANT", variant, 1);
+    } else {
+        unsetenv("RENPY_VARIANT");
+    }
     setenv("RENPY_PLATFORM", "ios-arm64", 1);
     setenv("RENPY_ALLOW_NETWORK", allowNetwork ? "1" : "0", 1);
     setenv("RENPY_DEV_MODE", devMode ? "1" : "0", 1);
+    setenv("RENPY_ENABLE_CONSOLE", enableConsole ? "1" : "0", 1);
     setenv("RENPY_FORCE_ROLLBACK", forceRollback ? "1" : "0", 1);
     setenv("RENPY_FORCE_SKIP", forceSkip ? "1" : "0", 1);
+    setenv("RENPY_FORCE_UNSEEN_SKIP", forceUnseenSkip ? "1" : "0", 1);
     setenv("RENPY_LESS_MEMORY", lessMemory ? "1" : "0", 1);
-    setenv("RENPY_LESS_UPDATES", "1", 1);
+    setenv("RENPY_LESS_UPDATES", lessUpdates ? "1" : "0", 1);
+    setenv("RENPY_TRANSPARENT_TEXTBOX", transparentTextboxes ? "1" : "0", 1);
+    setenv("RENPY_COMPAT_PATCHES", compatPatches ? "1" : "0", 1);
+    setenv("RENPY_SAFE_MODE", safeMode ? "1" : "0", 1);
+    char volBuf[32];
+    double clampedVol = masterVolume < 0.0 ? 0.0 : (masterVolume > 1.0 ? 1.0 : masterVolume);
+    snprintf(volBuf, sizeof(volBuf), "%.2f", clampedVol);
+    setenv("RENPY_MASTER_VOLUME", volBuf, 1);
 
     if (g_loaded_framework[0] != '\0') {
         if (errorBuf && errorBufSize > 0) {
@@ -1118,9 +1208,19 @@ int renplay_launch_engine(
     atomic_store(&g_engine_wants_text_input, 0);
     atomic_store(&g_kbd_user_hidden, 0);
     atomic_store(&g_kbd_manual_open, 0);
+    atomic_store(&g_dialogue_seen, 0);
+    atomic_store(&g_dialogue_total, 0);
     pthread_mutex_lock(&g_key_queue_lock);
     [g_key_queue removeAllObjects];
     pthread_mutex_unlock(&g_key_queue_lock);
+    pthread_mutex_lock(&g_mouse_lock);
+    g_mouse_head = 0;
+    g_mouse_tail = 0;
+    pthread_mutex_unlock(&g_mouse_lock);
+    pthread_mutex_lock(&g_rpc_lock);
+    [g_rpc_requests removeAllObjects];
+    [g_rpc_replies removeAllObjects];
+    pthread_mutex_unlock(&g_rpc_lock);
 
     // librenpython resolves <dirname(argv[0])>/base/main.py and /base/lib/pythonX.Y.
     char argv0[2048];
@@ -1318,6 +1418,166 @@ int renplay_bridge_consume_key_event(char *buf, size_t bufSize) {
     return (int)len;
 }
 
+void renplay_set_preferred_orientation(int mode) {
+    atomic_store(&g_preferred_orientation, mode);
+    dispatch_block_t applyBlock = ^{
+        UIWindowScene *scene = renplay_resolve_target_scene();
+        if (!scene) return;
+        UIInterfaceOrientationMask mask;
+        switch (mode) {
+            case 1: mask = UIInterfaceOrientationMaskLandscapeLeft; break;
+            case 2: mask = UIInterfaceOrientationMaskLandscapeRight; break;
+            case 3: mask = UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown; break;
+            case 4: mask = UIInterfaceOrientationMaskLandscape; break;
+            default: mask = UIInterfaceOrientationMaskAllButUpsideDown; break;
+        }
+        for (UIWindow *win in scene.windows) {
+            if (win.rootViewController) {
+                if (@available(iOS 16.0, *)) {
+                    [win.rootViewController setNeedsUpdateOfSupportedInterfaceOrientations];
+                }
+            }
+        }
+        if (@available(iOS 16.0, *)) {
+            UIWindowSceneGeometryPreferencesIOS *prefs =
+                [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:mask];
+            [scene requestGeometryUpdateWithPreferences:prefs errorHandler:^(NSError *error) {
+                if (error) {
+                    NSLog(@"[RenPlay] Orientation request note: %@", error.localizedDescription);
+                }
+            }];
+        }
+    };
+    if ([NSThread isMainThread]) {
+        applyBlock();
+    } else {
+        CFRunLoopRef mainLoop = CFRunLoopGetMain();
+        CFRunLoopPerformBlock(mainLoop, kCFRunLoopCommonModes, applyBlock);
+        CFRunLoopWakeUp(mainLoop);
+    }
+}
+
+int renplay_get_preferred_orientation(void) {
+    return atomic_load(&g_preferred_orientation);
+}
+
+__attribute__((visibility("default"), used))
+void renplay_bridge_report_stats(int seenBlocks, int totalBlocks) {
+    atomic_store(&g_dialogue_seen, seenBlocks);
+    atomic_store(&g_dialogue_total, totalBlocks);
+}
+
+void renplay_get_dialogue_stats(int *seenOut, int *totalOut) {
+    if (seenOut) *seenOut = atomic_load(&g_dialogue_seen);
+    if (totalOut) *totalOut = atomic_load(&g_dialogue_total);
+}
+
+void renplay_send_virtual_mouse(float normX, float normY, int button, int eventType) {
+    pthread_mutex_lock(&g_mouse_lock);
+    int nextTail = (g_mouse_tail + 1) % RENPLAY_MOUSE_RING_CAP;
+    if (nextTail == g_mouse_head) {
+        g_mouse_head = (g_mouse_head + 1) % RENPLAY_MOUSE_RING_CAP;
+    }
+    g_mouse_ring[g_mouse_tail] = (RenPlayMouseEvent){
+        .normX = normX,
+        .normY = normY,
+        .button = button,
+        .eventType = eventType,
+    };
+    g_mouse_tail = nextTail;
+    pthread_mutex_unlock(&g_mouse_lock);
+}
+
+__attribute__((visibility("default"), used))
+int renplay_bridge_consume_mouse_event(float *normX, float *normY, int *button, int *eventType) {
+    pthread_mutex_lock(&g_mouse_lock);
+    if (g_mouse_head == g_mouse_tail) {
+        pthread_mutex_unlock(&g_mouse_lock);
+        return 0;
+    }
+    RenPlayMouseEvent ev = g_mouse_ring[g_mouse_head];
+    g_mouse_head = (g_mouse_head + 1) % RENPLAY_MOUSE_RING_CAP;
+    pthread_mutex_unlock(&g_mouse_lock);
+    if (normX) *normX = ev.normX;
+    if (normY) *normY = ev.normY;
+    if (button) *button = ev.button;
+    if (eventType) *eventType = ev.eventType;
+    return 1;
+}
+
+static void renplay_copy_cstring(NSString *str, char *buf, size_t bufSize) {
+    if (!buf || bufSize == 0) return;
+    const char *utf8 = str.UTF8String;
+    if (!utf8) {
+        buf[0] = '\0';
+        return;
+    }
+    size_t len = strlen(utf8);
+    if (len >= bufSize) len = bufSize - 1;
+    memcpy(buf, utf8, len);
+    buf[len] = '\0';
+}
+
+void renplay_enqueue_rpc(const char *jsonUTF8) {
+    if (!jsonUTF8) return;
+    NSString *str = [NSString stringWithUTF8String:jsonUTF8];
+    if (!str) return;
+    pthread_mutex_lock(&g_rpc_lock);
+    if (!g_rpc_requests) g_rpc_requests = [[NSMutableArray alloc] init];
+    if (g_rpc_requests.count < 64) {
+        [g_rpc_requests addObject:str];
+    }
+    pthread_mutex_unlock(&g_rpc_lock);
+}
+
+__attribute__((visibility("default"), used))
+int renplay_bridge_consume_rpc(char *buf, size_t bufSize) {
+    if (!buf || bufSize == 0) return 0;
+    NSString *first = nil;
+    pthread_mutex_lock(&g_rpc_lock);
+    if (g_rpc_requests.count > 0) {
+        first = [g_rpc_requests objectAtIndex:0];
+        [g_rpc_requests removeObjectAtIndex:0];
+    }
+    pthread_mutex_unlock(&g_rpc_lock);
+    if (!first) {
+        buf[0] = '\0';
+        return 0;
+    }
+    renplay_copy_cstring(first, buf, bufSize);
+    return (int)strlen(buf);
+}
+
+__attribute__((visibility("default"), used))
+void renplay_bridge_post_rpc_reply(const char *jsonUTF8) {
+    if (!jsonUTF8) return;
+    NSString *str = [NSString stringWithUTF8String:jsonUTF8];
+    if (!str) return;
+    pthread_mutex_lock(&g_rpc_lock);
+    if (!g_rpc_replies) g_rpc_replies = [[NSMutableArray alloc] init];
+    if (g_rpc_replies.count < 64) {
+        [g_rpc_replies addObject:str];
+    }
+    pthread_mutex_unlock(&g_rpc_lock);
+}
+
+int renplay_poll_rpc_reply(char *buf, size_t bufSize) {
+    if (!buf || bufSize == 0) return 0;
+    NSString *first = nil;
+    pthread_mutex_lock(&g_rpc_lock);
+    if (g_rpc_replies.count > 0) {
+        first = [g_rpc_replies objectAtIndex:0];
+        [g_rpc_replies removeObjectAtIndex:0];
+    }
+    pthread_mutex_unlock(&g_rpc_lock);
+    if (!first) {
+        buf[0] = '\0';
+        return 0;
+    }
+    renplay_copy_cstring(first, buf, bufSize);
+    return (int)strlen(buf);
+}
+
 #else
 
 void renplay_install_sdl_scene_bridge(void) {}
@@ -1330,13 +1590,21 @@ int renplay_launch_engine(
     const char *gameDir,
     const char *saveDir,
     const char *logDir,
+    const char *multipersistentDir,
     const char *variant,
     int sdlVersionHint,
     int allowNetwork,
     int devMode,
+    int enableConsole,
     int forceRollback,
     int forceSkip,
+    int forceUnseenSkip,
     int lessMemory,
+    int lessUpdates,
+    int transparentTextboxes,
+    int compatPatches,
+    int safeMode,
+    double masterVolume,
     char *errorBuf,
     size_t errorBufSize
 ) {
@@ -1345,13 +1613,21 @@ int renplay_launch_engine(
     (void)gameDir;
     (void)saveDir;
     (void)logDir;
+    (void)multipersistentDir;
     (void)variant;
     (void)sdlVersionHint;
     (void)allowNetwork;
     (void)devMode;
+    (void)enableConsole;
     (void)forceRollback;
     (void)forceSkip;
+    (void)forceUnseenSkip;
     (void)lessMemory;
+    (void)lessUpdates;
+    (void)transparentTextboxes;
+    (void)compatPatches;
+    (void)safeMode;
+    (void)masterVolume;
     (void)errorBuf;
     (void)errorBufSize;
     return -1;
@@ -1368,6 +1644,20 @@ int renplay_should_show_keyboard_pill(void) { return 0; }
 void renplay_show_keyboard_from_ui(void) {}
 const char *renplay_get_log_file_path(void) { return NULL; }
 int renplay_has_sdl_window(void) { return 0; }
+void renplay_set_preferred_orientation(int mode) { (void)mode; }
+int renplay_get_preferred_orientation(void) { return 0; }
+void renplay_get_dialogue_stats(int *seenOut, int *totalOut) {
+    if (seenOut) *seenOut = 0;
+    if (totalOut) *totalOut = 0;
+}
+void renplay_send_virtual_mouse(float normX, float normY, int button, int eventType) {
+    (void)normX; (void)normY; (void)button; (void)eventType;
+}
+void renplay_enqueue_rpc(const char *jsonUTF8) { (void)jsonUTF8; }
+int renplay_poll_rpc_reply(char *buf, size_t bufSize) {
+    if (buf && bufSize > 0) buf[0] = '\0';
+    return 0;
+}
 int renplay_bridge_consume_command(void) { return 0; }
 void renplay_bridge_start_text_input(void) {}
 void renplay_bridge_stop_text_input(void) {}
@@ -1377,6 +1667,18 @@ int renplay_bridge_consume_key_event(char *buf, size_t bufSize) {
     if (buf && bufSize > 0) buf[0] = '\0';
     return 0;
 }
+void renplay_bridge_report_stats(int seenBlocks, int totalBlocks) {
+    (void)seenBlocks; (void)totalBlocks;
+}
+int renplay_bridge_consume_mouse_event(float *normX, float *normY, int *button, int *eventType) {
+    (void)normX; (void)normY; (void)button; (void)eventType;
+    return 0;
+}
+int renplay_bridge_consume_rpc(char *buf, size_t bufSize) {
+    if (buf && bufSize > 0) buf[0] = '\0';
+    return 0;
+}
+void renplay_bridge_post_rpc_reply(const char *jsonUTF8) { (void)jsonUTF8; }
 
 #endif
 

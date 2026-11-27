@@ -10,9 +10,14 @@ struct GameDetailView: View {
     let gameID: UUID
     @Environment(\.dismiss) private var dismiss
 
+    @State private var saveSlots: [SaveSlot] = []
+    @State private var showSettingsSheet = false
+    @State private var showSaveLinkSheet = false
     @State private var pendingDelete: GameEntry?
-    @State private var editedName = ""
-    @State private var showRenameAlert = false
+    @State private var showRenameTitleAlert = false
+    @State private var showRenameFolderAlert = false
+    @State private var showVersionAlert = false
+    @State private var draftInput = ""
 
     private var game: GameEntry? {
         appState.games.first(where: { $0.id == gameID })
@@ -21,145 +26,508 @@ struct GameDetailView: View {
     var body: some View {
         Group {
             if let game {
-                detailForm(for: game)
+                detailScroll(for: game)
             } else {
                 ContentUnavailableView("Game Not Found", systemImage: "questionmark.folder")
             }
         }
+        .onAppear {
+            reloadSaves()
+        }
     }
 
-    private func detailForm(for game: GameEntry) -> some View {
+    private func detailScroll(for game: GameEntry) -> some View {
         let resolved = appState.resolvedEngine(for: game)
         let gameBinding = Binding<GameEntry>(
             get: { appState.games.first(where: { $0.id == gameID }) ?? game },
             set: { appState.updateGame($0) }
         )
 
-        return Form {
-            Section {
-                HStack(spacing: 14) {
-                    coverThumbnail(for: game)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(game.displayName)
-                            .font(.headline)
-                        Text("Detected: \(game.detectedEngineVersion ?? "Unknown")")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text("Active Engine: \(resolved?.version ?? "Unavailable")")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.vertical, 4)
+        return ScrollView {
+            VStack(spacing: 20) {
+                heroSection(for: game)
 
-                Button {
-                    appState.launch(game: game)
-                } label: {
-                    Label("Launch Game", systemImage: "play.fill")
-                        .frame(maxWidth: .infinity)
-                        .font(.headline)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(resolved == nil || appState.isLaunching)
-            }
+                playButton(for: game, resolved: resolved)
+                    .padding(.horizontal)
 
-            Section {
-                Picker("Engine Version", selection: engineSelectionBinding(for: gameBinding)) {
-                    Text("Auto (\(resolved?.version ?? "None"))").tag("auto")
-                    ForEach(appState.engines) { eng in
-                        Text("Ren'Py \(eng.version) (\(eng.sdlVersion))").tag(eng.id)
-                    }
-                }
+                quickActionsRow(for: game, gameBinding: gameBinding)
+                    .padding(.horizontal)
 
-                Picker("Orientation", selection: gameBinding.settings.orientation) {
-                    Text("Auto").tag(GameOrientation.auto)
-                    Text("Landscape").tag(GameOrientation.landscape)
-                    Text("Portrait").tag(GameOrientation.portrait)
-                }
+                savesStripSection(for: game)
 
-                Toggle("Allow Network Access", isOn: gameBinding.settings.allowNetwork)
-                Toggle("Developer Mode & Console", isOn: gameBinding.settings.developerMode)
-                Toggle("Force Enable Rollback", isOn: gameBinding.settings.forceRollback)
-                Toggle("Force Enable Skip", isOn: gameBinding.settings.forceSkip)
-                Toggle("Low Memory Mode", isOn: gameBinding.settings.lowMemoryMode)
-            } header: {
-                Text("Runtime Configuration")
-            }
+                detailsCardsSection(for: game)
 
-            Section {
-                NavigationLink {
-                    GameSaveManagerView(appState: appState, game: game)
-                } label: {
-                    Label("Save Manager", systemImage: "externaldrive")
-                }
+                engineSection(for: game, gameBinding: gameBinding, resolved: resolved)
+                    .padding(.horizontal)
 
-                NavigationLink {
-                    AssetGalleryView(
-                        gameDir: appState.libraryStore.gameDirectory(for: game),
-                        remoteSource: game.remoteSource,
-                        remotePassword: game.remoteSource.map { appState.libraryStore.smbPassword(for: $0.serverID) } ?? ""
-                    )
-                } label: {
-                    Label("Asset Gallery", systemImage: "photo.on.rectangle.angled")
-                }
-
-                NavigationLink {
-                    SessionLogViewer(logDir: appState.libraryStore.logDirectory(for: game))
-                } label: {
-                    Label("Session Logs", systemImage: "doc.text.magnifyingglass")
-                }
-            } header: {
-                Text("Tools")
-            }
-
-            if let remote = game.remoteSource {
-                Section {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("smb://\(remote.host):\(remote.port)/\(remote.share)/\(remote.remotePath)")
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                        Text("Last synced: \(remote.lastSyncedAt.formatted(date: .abbreviated, time: .shortened))")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Button {
-                        Task { await appState.refreshRemoteSMBGame(game) }
-                    } label: {
-                        Label("Refresh Remote Scripts & Index", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .disabled(appState.isImporting)
-                } header: {
-                    Text("LAN Stream Source")
+                if let remote = game.remoteSource {
+                    networkSourceSection(for: game, remote: remote)
+                        .padding(.horizontal)
                 }
             }
-
-            Section {
-                Button("Rename Title") {
-                    editedName = game.displayName
-                    showRenameAlert = true
-                }
-                Button(game.remoteSource != nil ? "Remove from Library" : "Delete Game", role: .destructive) {
-                    pendingDelete = game
-                }
-            }
+            .padding(.bottom, 32)
         }
         .navigationTitle(game.displayName)
         .navigationBarTitleDisplayMode(.inline)
-        .alert("Rename Visual Novel", isPresented: $showRenameAlert) {
-            TextField("Title", text: $editedName)
-            Button("Save") {
-                let trimmed = editedName.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    var updated = game
-                    updated.displayName = trimmed
-                    appState.updateGame(updated)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Settings", systemImage: "gearshape") {
+                    showSettingsSheet = true
                 }
+            }
+        }
+        .sheet(isPresented: $showSettingsSheet) {
+            GameSettingsSheet(appState: appState, gameID: gameID)
+        }
+        .sheet(isPresented: $showSaveLinkSheet) {
+            SaveFolderLinkSheet(appState: appState, gameID: gameID)
+        }
+        .alert("Rename Game", isPresented: $showRenameTitleAlert) {
+            TextField("Title", text: $draftInput)
+            Button("Save") {
+                let clean = draftInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !clean.isEmpty {
+                    var copy = game
+                    copy.displayName = clean
+                    appState.updateGame(copy)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Rename Folder", isPresented: $showRenameFolderAlert) {
+            TextField("Folder name", text: $draftInput)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button("Rename") {
+                appState.renameGameDirectory(game, to: draftInput)
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Game Version", isPresented: $showVersionAlert) {
+            TextField("Version (e.g. 1.0.0)", text: $draftInput)
+                .textInputAutocapitalization(.never)
+            Button("Save") {
+                var copy = game
+                let clean = draftInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                copy.gameVersion = clean.isEmpty ? nil : clean
+                appState.updateGame(copy)
             }
             Button("Cancel", role: .cancel) {}
         }
         .gameDeletionDialog(pending: $pendingDelete, appState: appState) {
             dismiss()
         }
+    }
+
+    @ViewBuilder
+    private func heroSection(for game: GameEntry) -> some View {
+        let heroImage = loadArtwork(relPath: game.customHeroPath ?? game.customCoverPath ?? game.coverRelativePath, game: game)
+        let accent = Color(category: game.category)
+
+        ZStack(alignment: .bottom) {
+            Group {
+                if let heroImage {
+                    Color.clear
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 230)
+                        .overlay {
+                            Image(uiImage: heroImage)
+                                .resizable()
+                                .scaledToFill()
+                        }
+                        .clipped()
+                        .overlay {
+                            LinearGradient(
+                                colors: [.clear, Color(.systemBackground).opacity(0.65), Color(.systemBackground)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        }
+                } else {
+                    LinearGradient(
+                        colors: [accent.opacity(0.35), Color(.systemBackground)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 170)
+                    .overlay {
+                        Image(systemName: "books.vertical.fill")
+                            .font(.system(size: 52))
+                            .foregroundStyle(.white.opacity(0.3))
+                            .offset(y: -18)
+                    }
+                }
+            }
+
+            if game.settings.showTitleWithArtwork || heroImage == nil {
+                VStack(spacing: 4) {
+                    Text(game.displayName)
+                        .font(.title2.bold())
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+
+                    if !subtitleLine(for: game).isEmpty {
+                        Text(subtitleLine(for: game))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.bottom, 4)
+            }
+        }
+    }
+
+    private func subtitleLine(for game: GameEntry) -> String {
+        var items: [String] = []
+        if let ver = game.gameVersion, !ver.isEmpty {
+            items.append(ver)
+        }
+        if let size = game.sizeBytes, size > 0 {
+            items.append(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
+        }
+        if game.remoteSource != nil {
+            items.append("Network Share")
+        }
+        return items.joined(separator: " • ")
+    }
+
+    private func playButton(for game: GameEntry, resolved: EngineInfo?) -> some View {
+        let canResume = game.lastPlayedAt != nil || !saveSlots.isEmpty
+        let title: String
+        if let pct = game.dialogueProgressFraction, canResume {
+            title = "Resume • \(Int((pct * 100).rounded()))%"
+        } else {
+            title = canResume ? "Resume" : "Play"
+        }
+
+        return Button {
+            appState.launch(game: game)
+        } label: {
+            Label(title, systemImage: "play.fill")
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(Color(category: game.category))
+        .controlSize(.large)
+        .clipShape(.capsule)
+        .disabled(resolved == nil || appState.isLaunching)
+    }
+
+    private func quickActionsRow(for game: GameEntry, gameBinding: Binding<GameEntry>) -> some View {
+        HStack(spacing: 0) {
+            NavigationLink {
+                GameSaveManagerView(appState: appState, game: game)
+            } label: {
+                quickActionCircle(title: "Saves", systemImage: "externaldrive")
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+
+            NavigationLink {
+                AssetGalleryView(
+                    gameDir: appState.libraryStore.gameDirectory(for: game),
+                    remoteSource: game.remoteSource,
+                    remotePassword: game.remoteSource.map { appState.libraryStore.smbPassword(for: $0.serverID) } ?? ""
+                )
+            } label: {
+                quickActionCircle(title: "Gallery", systemImage: "photo.on.rectangle")
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+
+            Button {
+                showSettingsSheet = true
+            } label: {
+                quickActionCircle(title: "Settings", systemImage: "gearshape")
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+
+            NavigationLink {
+                SessionLogViewer(logDir: appState.libraryStore.logDirectory(for: game))
+            } label: {
+                quickActionCircle(title: "Logs", systemImage: "doc.text")
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+
+            Menu {
+                if game.remoteSource == nil {
+                    Button("Rename Folder...", systemImage: "folder") {
+                        draftInput = game.folderName
+                        showRenameFolderAlert = true
+                    }
+                } else {
+                    Button("Sync Scripts", systemImage: "arrow.triangle.2.circlepath") {
+                        Task { await appState.refreshRemoteSMBGame(game) }
+                    }
+                }
+                Button("Rename Game...", systemImage: "pencil") {
+                    draftInput = game.displayName
+                    showRenameTitleAlert = true
+                }
+                Button("Edit Version...", systemImage: "number") {
+                    draftInput = game.gameVersion ?? ""
+                    showVersionAlert = true
+                }
+                Menu("Category", systemImage: "tag") {
+                    Button("None") {
+                        var copy = game
+                        copy.category = nil
+                        appState.updateGame(copy)
+                    }
+                    ForEach(GameCategory.allCases, id: \.self) { cat in
+                        Button {
+                            var copy = game
+                            copy.category = cat
+                            appState.updateGame(copy)
+                        } label: {
+                            if game.category == cat {
+                                Label(cat.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(cat.displayName)
+                            }
+                        }
+                    }
+                }
+                Divider()
+                Button(game.remoteSource != nil ? "Remove from Library" : "Delete Game", systemImage: "trash", role: .destructive) {
+                    pendingDelete = game
+                }
+            } label: {
+                quickActionCircle(title: "More", systemImage: "ellipsis")
+            }
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private func quickActionCircle(title: String, systemImage: String) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(.primary)
+                .frame(width: 48, height: 48)
+                .background(Color(.secondarySystemGroupedBackground))
+                .clipShape(.circle)
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    private func savesStripSection(for game: GameEntry) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Saves")
+                    .font(.headline)
+                Text("\(saveSlots.count)")
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                NavigationLink {
+                    GameSaveManagerView(appState: appState, game: game)
+                } label: {
+                    HStack(spacing: 3) {
+                        Text("See All")
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal)
+
+            if saveSlots.isEmpty {
+                Text("No saves yet")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(Color(.secondarySystemGroupedBackground))
+                    .clipShape(.rect(cornerRadius: 12))
+                    .padding(.horizontal)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(saveSlots.prefix(10)) { slot in
+                            NavigationLink {
+                                GameSaveManagerView(appState: appState, game: game)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Color.clear
+                                        .frame(width: 148, height: 84)
+                                        .overlay {
+                                            if let data = slot.screenshotData, let img = UIImage(data: data) {
+                                                Image(uiImage: img)
+                                                    .resizable()
+                                                    .scaledToFill()
+                                            } else {
+                                                Color(.tertiarySystemGroupedBackground)
+                                                    .overlay {
+                                                        Image(systemName: slot.kind == .persistent ? "gearshape.2" : "photo")
+                                                            .foregroundStyle(.secondary)
+                                                    }
+                                            }
+                                        }
+                                        .clipped()
+                                        .clipShape(.rect(cornerRadius: 8))
+
+                                    Text(slot.slotLabel)
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+
+                                    Text(slot.modifiedAt, style: .relative)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                .frame(width: 148, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+            }
+        }
+    }
+
+    private func detailsCardsSection(for game: GameEntry) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Details")
+                .font(.headline)
+                .padding(.horizontal)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    statCard(title: "Play Time", value: formatPlayTime(game.playTimeSeconds))
+                    statCard(
+                        title: "Last Played",
+                        value: game.lastPlayedAt?.formatted(date: .abbreviated, time: .omitted) ?? "Never"
+                    )
+                    Button {
+                        showSaveLinkSheet = true
+                    } label: {
+                        statCard(
+                            title: "Save Folder",
+                            value: game.saveIdentifier ?? String(game.id.uuidString.prefix(8)),
+                            icon: "folder"
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal)
+            }
+        }
+    }
+
+    private func statCard(title: String, value: String, icon: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text(value)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(.rect(cornerRadius: 14))
+    }
+
+    private func engineSection(for game: GameEntry, gameBinding: Binding<GameEntry>, resolved: EngineInfo?) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Engine")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Picker("Engine", selection: engineSelectionBinding(for: gameBinding)) {
+                    Text("Engine \(resolved?.version ?? "Auto") (Auto)").tag("auto")
+                    ForEach(appState.engines) { eng in
+                        Text("Ren'Py \(eng.version) (\(eng.sdlVersion))").tag(eng.id)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+
+            Divider().padding(.leading, 14)
+
+            HStack {
+                Text("Ren'Py Version")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(game.detectedEngineVersion ?? "Unknown")
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(.primary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+        }
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(.rect(cornerRadius: 12))
+    }
+
+    private func networkSourceSection(for game: GameEntry, remote: SMBGameSource) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("smb://\(remote.host)/\(remote.share)/\(remote.remotePath)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    Text("Synced \(remote.lastSyncedAt.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
+                Button("Sync") {
+                    Task { await appState.refreshRemoteSMBGame(game) }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(appState.isImporting)
+            }
+        }
+        .padding(14)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(.rect(cornerRadius: 12))
+    }
+
+    private func reloadSaves() {
+        guard let game else { return }
+        saveSlots = appState.saveManager.listSaves(in: appState.libraryStore.saveDirectory(for: game))
+    }
+
+    private func loadArtwork(relPath: String?, game: GameEntry) -> UIImage? {
+        guard let relPath else { return nil }
+        let url = appState.libraryStore.gameDirectory(for: game).appendingPathComponent(relPath)
+        return UIImage(contentsOfFile: url.path)
+    }
+
+    private func formatPlayTime(_ seconds: TimeInterval) -> String {
+        let mins = Int(seconds / 60)
+        if mins < 60 { return "\(mins)m" }
+        let hrs = mins / 60
+        let rem = mins % 60
+        return rem > 0 ? "\(hrs)h \(rem)m" : "\(hrs)h"
     }
 
     private func engineSelectionBinding(for game: Binding<GameEntry>) -> Binding<String> {
@@ -177,26 +545,185 @@ struct GameDetailView: View {
             }
         )
     }
+}
 
-    @ViewBuilder
-    private func coverThumbnail(for game: GameEntry) -> some View {
-        let coverURL = game.coverRelativePath.map {
-            appState.libraryStore.gameDirectory(for: game).appendingPathComponent($0)
-        }
-        if let coverURL, let image = UIImage(contentsOfFile: coverURL.path) {
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFill()
-                .frame(width: 84, height: 64)
-                .clipShape(.rect(cornerRadius: 10))
-        } else {
-            RoundedRectangle(cornerRadius: 10)
-                .fill(.quaternary)
-                .frame(width: 84, height: 64)
-                .overlay {
-                    Image(systemName: "photo")
-                        .foregroundStyle(.secondary)
+struct GameSettingsSheet: View {
+    @Bindable var appState: AppState
+    let gameID: UUID
+    @Environment(\.dismiss) private var dismiss
+    @State private var showVariantPicker = false
+
+    private var game: GameEntry? {
+        appState.games.first(where: { $0.id == gameID })
+    }
+
+    var body: some View {
+        NavigationStack {
+            if let game {
+                let binding = Binding<GameEntry>(
+                    get: { appState.games.first(where: { $0.id == gameID }) ?? game },
+                    set: { appState.updateGame($0) }
+                )
+                Form {
+                    Section("General") {
+                        Toggle("Safe Mode", isOn: binding.settings.safeMode)
+                        Picker("Engine", selection: engineModeBinding(binding)) {
+                            Text("Auto").tag("auto")
+                            ForEach(appState.engines) { eng in
+                                Text("Ren'Py \(eng.version) (\(eng.sdlVersion))").tag(eng.id)
+                            }
+                        }
+                        Picker("Screen Rotation", selection: binding.settings.screenRotation) {
+                            ForEach(ScreenRotationPreference.allCases, id: \.self) { pref in
+                                Text(pref.displayName).tag(pref)
+                            }
+                        }
+                    }
+
+                    Section("Appearance") {
+                        Picker("Category", selection: categoryBinding(binding)) {
+                            Text("None").tag(Optional<GameCategory>.none)
+                            ForEach(GameCategory.allCases, id: \.self) { cat in
+                                Text(cat.displayName).tag(Optional(cat))
+                            }
+                        }
+                        Toggle("Show Title With Artwork", isOn: binding.settings.showTitleWithArtwork)
+                        ArtworkPhotoPicker(
+                            title: "Set Cover Image...",
+                            hasCustomImage: game.customCoverPath != nil,
+                            onSelectData: { data in appState.setCustomArtwork(data: data, kind: .cover, for: game) },
+                            onReset: { appState.clearCustomArtwork(kind: .cover, for: game) }
+                        )
+                        ArtworkPhotoPicker(
+                            title: "Set Hero Image...",
+                            hasCustomImage: game.customHeroPath != nil,
+                            onSelectData: { data in appState.setCustomArtwork(data: data, kind: .hero, for: game) },
+                            onReset: { appState.clearCustomArtwork(kind: .hero, for: game) }
+                        )
+                    }
+
+                    Section("Ren'Py Options") {
+                        Toggle("Use Global Settings", isOn: binding.settings.useGlobalSettings)
+
+                        Group {
+                            Toggle("Developer Mode", isOn: runtimeBoolBinding(binding, \.developerMode, global: appState.appSettings.globalDeveloperMode))
+                            Toggle("Enable Console", isOn: runtimeBoolBinding(binding, \.enableConsole, global: appState.appSettings.globalEnableConsole))
+                            Toggle("Use Less Memory", isOn: runtimeBoolBinding(binding, \.lowMemoryMode, global: appState.appSettings.globalLowMemory))
+                            Toggle("Less Screen Updates", isOn: runtimeBoolBinding(binding, \.lessScreenUpdates, global: appState.appSettings.globalLessUpdates))
+                            Toggle("Force Rollback", isOn: runtimeBoolBinding(binding, \.forceRollback, global: appState.appSettings.globalForceRollback))
+                            Toggle("Force Skip", isOn: runtimeBoolBinding(binding, \.forceSkip, global: appState.appSettings.globalForceSkip))
+                            Toggle("Skip Unseen Text", isOn: runtimeBoolBinding(binding, \.forceUnseenSkip, global: appState.appSettings.globalForceUnseenSkip))
+                            Toggle("Transparent Textboxes", isOn: runtimeBoolBinding(binding, \.transparentTextboxes, global: appState.appSettings.globalTransparentTextboxes))
+                            Toggle("Allow Network Access", isOn: binding.settings.allowNetwork)
+                            Toggle("Compatibility Patches", isOn: runtimeBoolBinding(binding, \.compatibilityPatches, global: appState.appSettings.globalCompatibilityPatches))
+                            Toggle("Override Device Variant", isOn: runtimeBoolBinding(binding, \.overrideDeviceVariant, global: appState.appSettings.globalOverrideVariant))
+                        }
+                        .disabled(binding.wrappedValue.settings.useGlobalSettings)
+
+                        Button("Select Variants") {
+                            showVariantPicker = true
+                        }
+                        .disabled(binding.wrappedValue.settings.useGlobalSettings || !binding.wrappedValue.settings.overrideDeviceVariant)
+                    }
                 }
+                .navigationTitle("Game Settings")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+                .sheet(isPresented: $showVariantPicker) {
+                    VariantSelectionSheet(selectedVariants: binding.settings.selectedVariants)
+                }
+            }
+        }
+    }
+
+    private func engineModeBinding(_ game: Binding<GameEntry>) -> Binding<String> {
+        Binding<String>(
+            get: {
+                switch game.wrappedValue.settings.engineMode {
+                case .auto: return "auto"
+                case .pinned(let id): return id
+                }
+            },
+            set: { val in
+                var copy = game.wrappedValue
+                copy.settings.engineMode = (val == "auto") ? .auto : .pinned(val)
+                game.wrappedValue = copy
+            }
+        )
+    }
+
+    private func categoryBinding(_ game: Binding<GameEntry>) -> Binding<GameCategory?> {
+        Binding<GameCategory?>(
+            get: { game.wrappedValue.category },
+            set: { val in
+                var copy = game.wrappedValue
+                copy.category = val
+                game.wrappedValue = copy
+            }
+        )
+    }
+
+    private func runtimeBoolBinding(
+        _ game: Binding<GameEntry>,
+        _ keyPath: WritableKeyPath<GameSettings, Bool>,
+        global: Bool
+    ) -> Binding<Bool> {
+        Binding<Bool>(
+            get: { game.wrappedValue.settings.useGlobalSettings ? global : game.wrappedValue.settings[keyPath: keyPath] },
+            set: { val in
+                var copy = game.wrappedValue
+                copy.settings[keyPath: keyPath] = val
+                game.wrappedValue = copy
+            }
+        )
+    }
+}
+
+struct VariantSelectionSheet: View {
+    @Binding var selectedVariants: [String]
+    @Environment(\.dismiss) private var dismiss
+
+    private static let allVariants = [
+        "pc", "large", "medium",
+        "small", "tablet", "phone",
+        "touch", "tv", "android",
+        "ios", "mobile", "web",
+    ]
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(Self.allVariants, id: \.self) { variant in
+                    Button {
+                        if let idx = selectedVariants.firstIndex(of: variant) {
+                            selectedVariants.remove(at: idx)
+                        } else {
+                            selectedVariants.append(variant)
+                        }
+                    } label: {
+                        HStack {
+                            Text(variant)
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            if selectedVariants.contains(variant) {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(.tint)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Device Variants")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
         }
     }
 }
@@ -215,7 +742,11 @@ struct SessionLogViewer: View {
         }
         .navigationTitle("Session Logs")
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button("Copy", systemImage: "doc.on.doc") {
+                    UIPasteboard.general.string = logText
+                }
+                .disabled(logText.isEmpty)
                 Button("Refresh", systemImage: "arrow.clockwise") {
                     loadLogs()
                 }

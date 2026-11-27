@@ -44,16 +44,39 @@ int renplay_launch_engine(
     const char *gameDir,
     const char *saveDir,
     const char *logDir,
+    const char *multipersistentDir,
     const char *variant,
     int sdlVersionHint,
     int allowNetwork,
     int devMode,
+    int enableConsole,
     int forceRollback,
     int forceSkip,
+    int forceUnseenSkip,
     int lessMemory,
+    int lessUpdates,
+    int transparentTextboxes,
+    int compatPatches,
+    int safeMode,
+    double masterVolume,
     char *errorBuf,
     size_t errorBufSize
 );
+
+// Live orientation lock: 0=all, 1=landscapeLeft, 2=landscapeRight, 3=portrait, 4=landscapeBoth.
+void renplay_set_preferred_orientation(int mode);
+int renplay_get_preferred_orientation(void);
+
+// Reads latest dialogue progress counters reported by Python.
+void renplay_get_dialogue_stats(int *seenOut, int *totalOut);
+
+// Enqueues normalized (0..1) virtual mouse movement or click events for Ren'Py.
+// eventType: 0=move, 1=down, 2=up; button: 1=left, 3=right.
+void renplay_send_virtual_mouse(float normX, float normY, int button, int eventType);
+
+// Queues a JSON RPC request for Ren'Py and polls replies from Objective-C/Swift.
+void renplay_enqueue_rpc(const char *jsonUTF8);
+int renplay_poll_rpc_reply(char *buf, size_t bufSize);
 
 // Injects an SDL_QUIT event into the active engine handle.
 void renplay_send_sdl_quit(void);
@@ -109,6 +132,10 @@ void renplay_bridge_stop_text_input(void);
 int renplay_bridge_is_keyboard_shown(void);
 void renplay_bridge_reopen_if_active(void);
 int renplay_bridge_consume_key_event(char *buf, size_t bufSize);
+void renplay_bridge_report_stats(int seenBlocks, int totalBlocks);
+int renplay_bridge_consume_mouse_event(float *normX, float *normY, int *button, int *eventType);
+int renplay_bridge_consume_rpc(char *buf, size_t bufSize);
+void renplay_bridge_post_rpc_reply(const char *jsonUTF8);
 
 #ifdef __cplusplus
 }

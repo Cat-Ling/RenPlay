@@ -16,6 +16,19 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         renplay_install_sdl_scene_bridge()
         return true
     }
+
+    func application(
+        _ application: UIApplication,
+        supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        switch renplay_get_preferred_orientation() {
+        case 1: return .landscapeLeft
+        case 2: return .landscapeRight
+        case 3: return [.portrait, .portraitUpsideDown]
+        case 4: return .landscape
+        default: return .allButUpsideDown
+        }
+    }
 }
 
 @main
@@ -51,7 +64,7 @@ struct ContentView: View {
                 }
         }
         .alert(
-            "RenPlay Notice",
+            appState.activeErrorTitle,
             isPresented: Binding(
                 get: { appState.activeError != nil },
                 set: { if !$0 { appState.activeError = nil } }

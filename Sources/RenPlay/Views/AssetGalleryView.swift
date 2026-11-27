@@ -47,6 +47,7 @@ struct AssetGalleryView: View {
 
     @State private var assets: [AssetItem] = []
     @State private var filterKind: AssetItem.Kind = .image
+    @State private var searchText = ""
     @State private var isLoading = true
     @State private var selectedImageAsset: AssetItem?
     @State private var playingAudioID: String?
@@ -56,7 +57,10 @@ struct AssetGalleryView: View {
     private static let audioExtensions: Set<String> = ["mp3", "ogg", "wav", "m4a", "aac"]
 
     private var filtered: [AssetItem] {
-        assets.filter { $0.kind == filterKind }
+        let byKind = assets.filter { $0.kind == filterKind }
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return byKind }
+        return byKind.filter { $0.name.localizedCaseInsensitiveContains(q) }
     }
 
     var body: some View {
@@ -74,7 +78,8 @@ struct AssetGalleryView: View {
                 audioList
             }
         }
-        .navigationTitle("Asset Gallery")
+        .navigationTitle("Gallery")
+        .searchable(text: $searchText, prompt: "Filter files")
         .toolbar {
             ToolbarItem(placement: .principal) {
                 Picker("Kind", selection: $filterKind) {
@@ -236,21 +241,22 @@ private struct AssetThumbView: View {
     @State private var thumbnail: UIImage?
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color(.secondarySystemGroupedBackground))
-                .frame(height: 100)
-            if let thumbnail {
-                Image(uiImage: thumbnail)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(height: 100)
-                    .clipShape(.rect(cornerRadius: 8))
-            } else {
-                ProgressView()
+        Color.clear
+            .frame(maxWidth: .infinity)
+            .frame(height: 100)
+            .overlay {
+                if let thumbnail {
+                    Image(uiImage: thumbnail)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Color(.secondarySystemGroupedBackground)
+                        .overlay { ProgressView() }
+                }
             }
-        }
-        .task {
+            .clipped()
+            .clipShape(.rect(cornerRadius: 8))
+            .task {
             let src = item
             let loaded = await Task.detached(priority: .utility) { () -> UIImage? in
                 guard let data = src.loadData() else { return nil }

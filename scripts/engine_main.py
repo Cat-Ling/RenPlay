@@ -99,6 +99,14 @@ def path_to_logdir(basedir):
     return basedir
 
 
+_MP_DIR = os.environ.get("RENPY_MULTIPERSISTENT", "")
+if _MP_DIR and not os.path.isdir(_MP_DIR):
+    try:
+        os.makedirs(_MP_DIR)
+    except OSError:
+        pass
+
+
 _SMB_HOOK_INSTALLED = False
 
 

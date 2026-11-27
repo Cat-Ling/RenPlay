@@ -103,8 +103,10 @@ public final class EngineLauncher {
         let saveDir = libraryStore.saveDirectory(for: game)
         let backupDir = libraryStore.backupDirectory(for: game)
         let logDir = libraryStore.logDirectory(for: game)
+        let multipersistentDir = libraryStore.multipersistentDir
         try fm.createDirectory(at: saveDir, withIntermediateDirectories: true)
         try fm.createDirectory(at: logDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: multipersistentDir, withIntermediateDirectories: true)
 
         if appSettings.autoBackupCount > 0 {
             statusUpdate("Backing up saves...")
@@ -114,7 +116,7 @@ public final class EngineLauncher {
         statusUpdate("Starting \(game.displayName)...")
 
         if let remote = game.remoteSource {
-            statusUpdate("Connecting to SMB share \(remote.host)/\(remote.share)...")
+            statusUpdate("Connecting to \(remote.host)/\(remote.share)...")
             let password = libraryStore.smbPassword(for: remote.serverID)
             let connectError: String? = await Task.detached(priority: .userInitiated) {
                 var errBuf = [CChar](repeating: 0, count: 512)
@@ -150,30 +152,51 @@ public final class EngineLauncher {
                 return nil
             }.value
             if let connectError {
-                throw LaunchError.engineFailure("Unable to mount SMB share: \(connectError)")
+                throw LaunchError.engineFailure("Unable to mount network share: \(connectError)")
             }
         } else {
             renplay_clear_smb_mount()
         }
 
+        let useGlobal = game.settings.useGlobalSettings
+        let safeMode = game.settings.safeMode
+        let overrideVariants = useGlobal ? appSettings.globalOverrideVariant : game.settings.overrideDeviceVariant
+        let selectedVariants = useGlobal ? appSettings.globalSelectedVariants : game.settings.selectedVariants
+
+        let orientationMode = Self.resolvedOrientationMode(game: game, appSettings: appSettings)
+        renplay_set_preferred_orientation(orientationMode)
+
         let variant: String
-        switch game.settings.orientation {
-        case .auto:
-            variant = UIDevice.current.userInterfaceIdiom == .pad ? "tablet touch" : "phone touch"
-        case .landscape:
-            variant = "touch"
-        case .portrait:
-            variant = "portrait touch"
+        if overrideVariants && !selectedVariants.isEmpty {
+            variant = selectedVariants.joined(separator: " ")
+        } else {
+            switch orientationMode {
+            case 3:
+                variant = "portrait touch"
+            case 1, 2, 4:
+                variant = "touch"
+            default:
+                variant = UIDevice.current.userInterfaceIdiom == .pad ? "tablet touch" : "phone touch"
+            }
         }
 
         let sdlVersion = engine.sdlVersion.uppercased().contains("3") ? 3 : 2
         let allowNetwork = (game.settings.allowNetwork || appSettings.globalAllowNetwork) ? 1 : 0
-        let devMode = game.settings.developerMode ? 1 : 0
-        let forceRollback = game.settings.forceRollback ? 1 : 0
-        let forceSkip = game.settings.forceSkip ? 1 : 0
-        let lessMemory = game.settings.lowMemoryMode ? 1 : 0
+        let devMode = (!safeMode && (useGlobal ? appSettings.globalDeveloperMode : game.settings.developerMode)) ? 1 : 0
+        let enableConsole = (!safeMode && (useGlobal ? appSettings.globalEnableConsole : game.settings.enableConsole)) ? 1 : 0
+        let forceRollback = (useGlobal ? appSettings.globalForceRollback : game.settings.forceRollback) ? 1 : 0
+        let forceSkip = (useGlobal ? appSettings.globalForceSkip : game.settings.forceSkip) ? 1 : 0
+        let forceUnseenSkip = (!safeMode && (useGlobal ? appSettings.globalForceUnseenSkip : game.settings.forceUnseenSkip)) ? 1 : 0
+        let lessMemory = (useGlobal ? appSettings.globalLowMemory : game.settings.lowMemoryMode) ? 1 : 0
+        let lessUpdates = (useGlobal ? appSettings.globalLessUpdates : game.settings.lessScreenUpdates) ? 1 : 0
+        let transparentTextboxes = (!safeMode && (useGlobal ? appSettings.globalTransparentTextboxes : game.settings.transparentTextboxes)) ? 1 : 0
+        let compatPatches = (!safeMode && (useGlobal ? appSettings.globalCompatibilityPatches : game.settings.compatibilityPatches)) ? 1 : 0
         let showOverlay = appSettings.showOverlayByDefault
         let overlayOpacity = appSettings.overlayOpacity
+        let showFPS = appSettings.showFPSOverlay
+        let showQuickBar = appSettings.showQuickBar
+        let mouseSpeed = appSettings.virtualMouseSpeed
+        let initialVolume = appSettings.renpyMasterVolume
         let gameTitle = game.displayName
 
         // Schedule engine launch on CFRunLoop rather than GCD main queue so XPC keyboard and UIKit
@@ -203,7 +226,16 @@ public final class EngineLauncher {
                             timer.invalidate()
                             MainActor.assumeIsolated {
                                 self.overlayPollTimer = nil
-                                self.installOverlay(gameName: gameTitle, logDir: logDir, opacity: overlayOpacity)
+                                self.installOverlay(
+                                    gameID: game.id,
+                                    gameName: gameTitle,
+                                    logDir: logDir,
+                                    opacity: overlayOpacity,
+                                    initialVolume: initialVolume,
+                                    showFPS: showFPS,
+                                    showQuickBar: showQuickBar,
+                                    mouseSpeed: mouseSpeed
+                                )
                             }
                         }
                     }
@@ -218,13 +250,21 @@ public final class EngineLauncher {
                     gameDir.path,
                     saveDir.path,
                     logDir.path,
+                    multipersistentDir.path,
                     variant,
                     Int32(sdlVersion),
                     Int32(allowNetwork),
                     Int32(devMode),
+                    Int32(enableConsole),
                     Int32(forceRollback),
                     Int32(forceSkip),
+                    Int32(forceUnseenSkip),
                     Int32(lessMemory),
+                    Int32(lessUpdates),
+                    Int32(transparentTextboxes),
+                    Int32(compatPatches),
+                    Int32(safeMode ? 1 : 0),
+                    initialVolume,
                     &errBuf,
                     errBuf.count
                 )
@@ -232,6 +272,7 @@ public final class EngineLauncher {
                 self.overlayPollTimer?.invalidate()
                 self.overlayPollTimer = nil
                 self.removeOverlay()
+                renplay_set_preferred_orientation(0)
                 if rc == 0 {
                     fflush(nil)
                     Darwin._exit(0)
@@ -251,14 +292,50 @@ public final class EngineLauncher {
         RunLoop.main.add(launchTimer, forMode: .common)
     }
 
-    private func installOverlay(gameName: String, logDir: URL, opacity: Double) {
+    private static func resolvedOrientationMode(game: GameEntry, appSettings: AppSettings) -> Int32 {
+        switch game.settings.screenRotation {
+        case .landscapeLeft: return 1
+        case .landscapeRight: return 2
+        case .portrait: return 3
+        case .landscape: return 4
+        case .auto: return 0
+        case .global:
+            let effective = game.settings.orientation == .auto ? appSettings.defaultRotation : game.settings.orientation
+            switch effective {
+            case .landscape: return 4
+            case .portrait: return 3
+            case .auto: return 0
+            }
+        }
+    }
+
+    private func installOverlay(
+        gameID: UUID,
+        gameName: String,
+        logDir: URL,
+        opacity: Double,
+        initialVolume: Double,
+        showFPS: Bool,
+        showQuickBar: Bool,
+        mouseSpeed: Double
+    ) {
         guard let scene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .first(where: { $0.activationState == .foregroundActive })
             ?? UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else {
             return
         }
-        let win = GameOverlayWindow(windowScene: scene, gameName: gameName, logDir: logDir, opacity: opacity)
+        let win = GameOverlayWindow(
+            windowScene: scene,
+            gameID: gameID,
+            gameName: gameName,
+            logDir: logDir,
+            opacity: opacity,
+            initialVolume: initialVolume,
+            showFPS: showFPS,
+            showQuickBar: showQuickBar,
+            mouseSpeed: mouseSpeed
+        )
         win.isHidden = false
         self.overlayWindow = win
     }
@@ -389,6 +466,14 @@ public final class EngineLauncher {
                     pass
             return override
         return basedir
+
+
+    _MP_DIR = os.environ.get("RENPY_MULTIPERSISTENT", "")
+    if _MP_DIR and not os.path.isdir(_MP_DIR):
+        try:
+            os.makedirs(_MP_DIR)
+        except OSError:
+            pass
 
 
     _SMB_HOOK_INSTALLED = False
@@ -711,25 +796,74 @@ public final class EngineLauncher {
     # SPDX-License-Identifier: GPL-3.0-or-later
     #
     # Loaded from renpy/common after game options.rpy so RenPlay runtime toggles,
-    # native iOS keyboard hooks, and the HUD command queue apply across 7.x and 8.x.
+    # native iOS keyboard/mouse hooks, variable tools, and HUD commands apply across 7.x and 8.x.
 
     init 999 python:
         import ctypes as _renplay_ctypes
+        import json as _renplay_json
         import os as _renplay_os
         import sys as _renplay_sys
+        import time as _renplay_time
+        import uuid as _renplay_uuid
 
-        if _renplay_os.environ.get("RENPY_DEV_MODE") == "1":
-            config.developer = True
-            config.console = True
+        _renplay_safe_mode = _renplay_os.environ.get("RENPY_SAFE_MODE") == "1"
 
-        if _renplay_os.environ.get("RENPY_FORCE_ROLLBACK") == "1":
-            config.rollback_enabled = True
-            if getattr(config, "hard_rollback_limit", 0) < 256:
-                config.hard_rollback_limit = 256
+        if not _renplay_safe_mode:
+            if _renplay_os.environ.get("RENPY_DEV_MODE") == "1":
+                config.developer = True
+            if _renplay_os.environ.get("RENPY_ENABLE_CONSOLE") == "1":
+                config.console = True
+            if _renplay_os.environ.get("RENPY_FORCE_ROLLBACK") == "1":
+                config.rollback_enabled = True
+                if getattr(config, "hard_rollback_limit", 0) < 256:
+                    config.hard_rollback_limit = 256
+            if _renplay_os.environ.get("RENPY_FORCE_SKIP") == "1":
+                config.allow_skipping = True
+                config.skip_indicator = True
+            if _renplay_os.environ.get("RENPY_FORCE_UNSEEN_SKIP") == "1":
+                preferences.skip_unseen = True
 
-        if _renplay_os.environ.get("RENPY_FORCE_SKIP") == "1":
-            config.allow_skipping = True
-            config.skip_indicator = True
+        try:
+            _vol_str = _renplay_os.environ.get("RENPY_MASTER_VOLUME", "")
+            if _vol_str:
+                _vol_val = max(0.0, min(1.0, float(_vol_str)))
+                if hasattr(preferences, "set_volume"):
+                    preferences.set_volume("main", _vol_val)
+                elif hasattr(preferences, "volumes") and isinstance(preferences.volumes, dict):
+                    preferences.volumes["main"] = _vol_val
+        except Exception:
+            pass
+
+        _renplay_saved_textbox_bg = {}
+
+        def _renplay_apply_transparent_textbox(enabled):
+            try:
+                for _sname in ("say_window", "window"):
+                    _st = getattr(style, _sname, None)
+                    if _st is None:
+                        continue
+                    if enabled:
+                        if _sname not in _renplay_saved_textbox_bg:
+                            try:
+                                _renplay_saved_textbox_bg[_sname] = _st.background
+                            except Exception:
+                                _renplay_saved_textbox_bg[_sname] = None
+                        _st.background = Solid((0, 0, 0, 96))
+                    elif _sname in _renplay_saved_textbox_bg:
+                        _st.background = _renplay_saved_textbox_bg[_sname]
+                try:
+                    if enabled:
+                        preferences.text_box_opacity = 0.35
+                    elif hasattr(preferences, "text_box_opacity"):
+                        preferences.text_box_opacity = 1.0
+                except Exception:
+                    pass
+                renpy.exports.restart_interaction()
+            except Exception:
+                pass
+
+        if not _renplay_safe_mode and _renplay_os.environ.get("RENPY_TRANSPARENT_TEXTBOX") == "1":
+            _renplay_apply_transparent_textbox(True)
 
         _renplay_c_consume_cmd = None
         _renplay_c_start_input = None
@@ -737,6 +871,10 @@ public final class EngineLauncher {
         _renplay_c_is_shown = None
         _renplay_c_reopen = None
         _renplay_c_consume_key = None
+        _renplay_c_report_stats = None
+        _renplay_c_consume_mouse = None
+        _renplay_c_consume_rpc = None
+        _renplay_c_post_rpc_reply = None
 
         try:
             _renplay_self_lib = _renplay_ctypes.CDLL(None)
@@ -763,6 +901,31 @@ public final class EngineLauncher {
             _renplay_c_consume_key = _renplay_self_lib.renplay_bridge_consume_key_event
             _renplay_c_consume_key.argtypes = [_renplay_ctypes.c_char_p, _renplay_ctypes.c_size_t]
             _renplay_c_consume_key.restype = _renplay_ctypes.c_int
+
+            _renplay_c_report_stats = getattr(_renplay_self_lib, "renplay_bridge_report_stats", None)
+            if _renplay_c_report_stats is not None:
+                _renplay_c_report_stats.argtypes = [_renplay_ctypes.c_int, _renplay_ctypes.c_int]
+                _renplay_c_report_stats.restype = None
+
+            _renplay_c_consume_mouse = getattr(_renplay_self_lib, "renplay_bridge_consume_mouse_event", None)
+            if _renplay_c_consume_mouse is not None:
+                _renplay_c_consume_mouse.argtypes = [
+                    _renplay_ctypes.POINTER(_renplay_ctypes.c_float),
+                    _renplay_ctypes.POINTER(_renplay_ctypes.c_float),
+                    _renplay_ctypes.POINTER(_renplay_ctypes.c_int),
+                    _renplay_ctypes.POINTER(_renplay_ctypes.c_int),
+                ]
+                _renplay_c_consume_mouse.restype = _renplay_ctypes.c_int
+
+            _renplay_c_consume_rpc = getattr(_renplay_self_lib, "renplay_bridge_consume_rpc", None)
+            if _renplay_c_consume_rpc is not None:
+                _renplay_c_consume_rpc.argtypes = [_renplay_ctypes.c_char_p, _renplay_ctypes.c_size_t]
+                _renplay_c_consume_rpc.restype = _renplay_ctypes.c_int
+
+            _renplay_c_post_rpc_reply = getattr(_renplay_self_lib, "renplay_bridge_post_rpc_reply", None)
+            if _renplay_c_post_rpc_reply is not None:
+                _renplay_c_post_rpc_reply.argtypes = [_renplay_ctypes.c_char_p]
+                _renplay_c_post_rpc_reply.restype = None
         except Exception:
             _renplay_c_consume_cmd = None
 
@@ -849,7 +1012,14 @@ public final class EngineLauncher {
             except Exception:
                 pass
 
-        def _renplay_post_key(vk, scancode, down_unicode):
+        _renplay_mod_mask = 0
+        _renplay_session_id = str(_renplay_uuid.uuid4())
+        _renplay_session_start = _renplay_time.time()
+        _renplay_last_stats_report = 0.0
+        _renplay_last_stats_flush = 0.0
+        _renplay_frozen_vars = {}
+
+        def _renplay_post_key(vk, scancode, down_unicode, mod=0):
             if _renplay_pg is None:
                 return
             _renplay_pg.event.post(_renplay_pg.event.Event(
@@ -857,7 +1027,7 @@ public final class EngineLauncher {
                 key=vk,
                 scancode=scancode,
                 unicode=down_unicode,
-                mod=0,
+                mod=mod,
                 repeat=False,
             ))
             _renplay_pg.event.post(_renplay_pg.event.Event(
@@ -865,15 +1035,244 @@ public final class EngineLauncher {
                 key=vk,
                 scancode=scancode,
                 unicode=u"",
-                mod=0,
+                mod=mod,
                 repeat=False,
             ))
 
+        def _renplay_post_rpc_reply_obj(obj):
+            if _renplay_c_post_rpc_reply is None:
+                return
+            try:
+                raw = _renplay_json.dumps(obj)
+                if not isinstance(raw, bytes):
+                    raw = raw.encode("utf-8")
+                _renplay_c_post_rpc_reply(raw)
+            except Exception:
+                pass
+
+        def _renplay_collect_dialogue_counts():
+            try:
+                seen = int(renpy.count_seen_dialogue_blocks())
+                total = int(renpy.count_dialogue_blocks())
+                return seen, total
+            except Exception:
+                return 0, 0
+
+        def _renplay_write_stats_file(seen, total):
+            save_dir = _renplay_os.environ.get("RENPY_SAVE_DIRECTORY", "")
+            if not save_dir or not _renplay_os.path.isdir(save_dir):
+                return
+            payload = {
+                "sessionId": _renplay_session_id,
+                "elapsedSeconds": max(0.0, float(_renplay_time.time() - _renplay_session_start)),
+                "seenBlocks": int(seen),
+                "totalBlocks": int(total),
+            }
+            tmp_path = _renplay_os.path.join(save_dir, ".renplay_stats.tmp")
+            dst_path = _renplay_os.path.join(save_dir, ".renplay_stats.json")
+            try:
+                fp = open(tmp_path, "w")
+                try:
+                    fp.write(_renplay_json.dumps(payload))
+                finally:
+                    fp.close()
+                _renplay_os.rename(tmp_path, dst_path)
+            except Exception:
+                pass
+
+        def _renplay_scope_object(scope_name):
+            if scope_name == "persistent":
+                return renpy.game.persistent
+            return renpy.store
+
+        def _renplay_var_kind_and_preview(val):
+            if isinstance(val, bool):
+                return "bool", ("true" if val else "false"), True
+            if isinstance(val, int):
+                return "int", str(val), True
+            if isinstance(val, float):
+                return "float", str(val), True
+            if isinstance(val, type(u"")) or isinstance(val, str):
+                s = str(val) if len(val) <= 120 else str(val[:120]) + "..."
+                return "str", s, True
+            try:
+                rep = repr(val)
+                if len(rep) > 120:
+                    rep = rep[:120] + "..."
+                return "object", rep, False
+            except Exception:
+                return "object", "<object>", False
+
+        def _renplay_handle_rpc(req):
+            op = req.get("op", "")
+            if op == "set_volume":
+                val = max(0.0, min(1.0, float(req.get("value", 1.0))))
+                if hasattr(preferences, "set_volume"):
+                    preferences.set_volume("main", val)
+                elif hasattr(preferences, "volumes") and isinstance(preferences.volumes, dict):
+                    preferences.volumes["main"] = val
+                return
+            if op == "set_transparent_textbox":
+                _renplay_apply_transparent_textbox(bool(req.get("enabled", False)))
+                return
+            if op == "open_console":
+                try:
+                    _console.enter()
+                except Exception:
+                    pass
+                return
+            if op == "reload_script":
+                try:
+                    renpy.exports.reload_script()
+                except Exception:
+                    pass
+                return
+            if op == "set_variants":
+                variants = req.get("variants", [])
+                if isinstance(variants, list) and variants:
+                    try:
+                        config.variants = [str(v) for v in variants]
+                        renpy.exports.restart_interaction()
+                        _renplay_post_rpc_reply_obj({"op": "set_variants", "ok": True, "variants": config.variants})
+                    except Exception as exc:
+                        _renplay_post_rpc_reply_obj({"op": "set_variants", "ok": False, "error": str(exc)})
+                return
+            if op == "unlock_gallery":
+                try:
+                    p = renpy.game.persistent
+                    if getattr(p, "_seen_ever", None) is None or not isinstance(p._seen_ever, dict):
+                        p._seen_ever = {}
+                    for k in getattr(renpy.game.script, "namemap", {}).keys():
+                        p._seen_ever[k] = True
+                    if getattr(p, "_seen_images", None) is None or not isinstance(p._seen_images, dict):
+                        try:
+                            p._seen_images = {}
+                        except Exception:
+                            pass
+                    imgs = getattr(renpy.display.image, "images", {})
+                    if isinstance(p._seen_images, dict):
+                        for ik in imgs.keys():
+                            p._seen_images[ik] = True
+                    elif isinstance(p._seen_images, set):
+                        for ik in imgs.keys():
+                            p._seen_images.add(ik)
+                    try:
+                        for obj in list(renpy.store.__dict__.values()):
+                            if hasattr(obj, "buttons") and hasattr(obj, "unlocked"):
+                                try:
+                                    obj.unlocked_advance = True
+                                except Exception:
+                                    pass
+                                for _bname, btn in getattr(obj, "buttons", {}).items():
+                                    try:
+                                        btn.conditions = []
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+                    renpy.loadsave.save_persistent()
+                    renpy.exports.restart_interaction()
+                    _renplay_post_rpc_reply_obj({
+                        "op": "unlock_gallery",
+                        "ok": True,
+                        "images": len(imgs),
+                        "blocks": len(getattr(renpy.game.script, "namemap", {})),
+                    })
+                except Exception as exc:
+                    _renplay_post_rpc_reply_obj({"op": "unlock_gallery", "ok": False, "error": str(exc)})
+                return
+            if op == "list_vars":
+                scope = req.get("scope", "store")
+                query = str(req.get("query", "")).strip().lower()
+                target = _renplay_scope_object(scope)
+                items = []
+                skip_names = set(["persistent", "renpy", "config", "store", "preferences", "style", "build", "os", "sys"])
+                raw_dict = getattr(target, "__dict__", {})
+                for k in sorted(raw_dict.keys()):
+                    ks = str(k)
+                    if ks.startswith("_") or ks in skip_names:
+                        continue
+                    if query and query not in ks.lower():
+                        continue
+                    val = raw_dict[k]
+                    if callable(val) or isinstance(val, type(_renplay_os)):
+                        continue
+                    kind, preview, editable = _renplay_var_kind_and_preview(val)
+                    items.append({
+                        "name": ks,
+                        "kind": kind,
+                        "value": preview,
+                        "editable": editable,
+                        "frozen": (scope, ks) in _renplay_frozen_vars,
+                    })
+                    if len(items) >= 150:
+                        break
+                _renplay_post_rpc_reply_obj({"op": "list_vars", "scope": scope, "items": items})
+                return
+            if op == "set_var":
+                scope = req.get("scope", "store")
+                name = str(req.get("name", ""))
+                kind = str(req.get("kind", "str"))
+                raw_val = str(req.get("value", ""))
+                freeze = bool(req.get("freeze", False))
+                target = _renplay_scope_object(scope)
+                try:
+                    if kind == "bool":
+                        parsed = raw_val.strip().lower() in ("1", "true", "yes", "on")
+                    elif kind == "int":
+                        parsed = int(raw_val.strip())
+                    elif kind == "float":
+                        parsed = float(raw_val.strip())
+                    else:
+                        parsed = raw_val
+                    setattr(target, name, parsed)
+                    if freeze:
+                        _renplay_frozen_vars[(scope, name)] = parsed
+                    renpy.exports.restart_interaction()
+                    _renplay_post_rpc_reply_obj({"op": "set_var", "ok": True, "name": name})
+                except Exception as exc:
+                    _renplay_post_rpc_reply_obj({"op": "set_var", "ok": False, "error": str(exc)})
+                return
+            if op == "toggle_freeze":
+                scope = req.get("scope", "store")
+                name = str(req.get("name", ""))
+                key = (scope, name)
+                if key in _renplay_frozen_vars:
+                    del _renplay_frozen_vars[key]
+                    frozen = False
+                else:
+                    target = _renplay_scope_object(scope)
+                    _renplay_frozen_vars[key] = getattr(target, name, None)
+                    frozen = True
+                _renplay_post_rpc_reply_obj({"op": "toggle_freeze", "scope": scope, "name": name, "frozen": frozen})
+
         _renplay_key_buf = _renplay_ctypes.create_string_buffer(512)
+        _renplay_rpc_buf = _renplay_ctypes.create_string_buffer(16384)
+        _renplay_mx = _renplay_ctypes.c_float(0.0)
+        _renplay_my = _renplay_ctypes.c_float(0.0)
+        _renplay_mbtn = _renplay_ctypes.c_int(1)
+        _renplay_mtype = _renplay_ctypes.c_int(0)
 
         def _renplay_poll_bridge():
+            global _renplay_mod_mask, _renplay_last_stats_report, _renplay_last_stats_flush
             if _renplay_c_consume_cmd is None:
                 return
+
+            if _renplay_frozen_vars:
+                for (_fscope, _fname), _fval in list(_renplay_frozen_vars.items()):
+                    try:
+                        setattr(_renplay_scope_object(_fscope), _fname, _fval)
+                    except Exception:
+                        pass
+
+            now = _renplay_time.time()
+            if _renplay_c_report_stats is not None and now - _renplay_last_stats_report >= 2.0:
+                _renplay_last_stats_report = now
+                seen, total = _renplay_collect_dialogue_counts()
+                _renplay_c_report_stats(seen, total)
+                if now - _renplay_last_stats_flush >= 10.0:
+                    _renplay_last_stats_flush = now
+                    _renplay_write_stats_file(seen, total)
 
             if _renplay_pg is not None and _renplay_c_consume_key is not None:
                 try:
@@ -883,26 +1282,98 @@ public final class EngineLauncher {
                             break
                         payload = _renplay_key_buf.raw[:n].decode("utf-8", "replace")
                         if payload.startswith("T:"):
-                            try:
-                                _renplay_pg.event.set_allowed(_renplay_pg.TEXTINPUT)
-                            except Exception:
-                                pass
-                            _renplay_pg.event.post(_renplay_pg.event.Event(
-                                _renplay_pg.TEXTINPUT,
-                                text=payload[2:],
-                            ))
+                            text = payload[2:]
+                            if _renplay_mod_mask != 0:
+                                for ch in text:
+                                    _renplay_post_key(ord(ch.lower()), 0, ch, mod=_renplay_mod_mask)
+                            else:
+                                try:
+                                    _renplay_pg.event.set_allowed(_renplay_pg.TEXTINPUT)
+                                except Exception:
+                                    pass
+                                _renplay_pg.event.post(_renplay_pg.event.Event(
+                                    _renplay_pg.TEXTINPUT,
+                                    text=text,
+                                ))
                         elif payload == "K:BACKSPACE":
                             _renplay_post_key(
                                 _renplay_pg.K_BACKSPACE,
                                 getattr(_renplay_pg, "KSCAN_BACKSPACE", 42),
                                 u"\b",
+                                mod=_renplay_mod_mask,
                             )
                         elif payload == "K:RETURN":
                             _renplay_post_key(
                                 _renplay_pg.K_RETURN,
                                 getattr(_renplay_pg, "KSCAN_RETURN", 40),
                                 u"\r",
+                                mod=_renplay_mod_mask,
                             )
+                        elif payload == "K:ESCAPE":
+                            _renplay_post_key(
+                                _renplay_pg.K_ESCAPE,
+                                getattr(_renplay_pg, "KSCAN_ESCAPE", 41),
+                                u"\x1b",
+                                mod=_renplay_mod_mask,
+                            )
+                        elif payload.startswith("M:CTRL:"):
+                            _ctrl = getattr(_renplay_pg, "KMOD_LCTRL", 0x0040)
+                            if payload.endswith(":1"):
+                                _renplay_mod_mask |= _ctrl
+                            else:
+                                _renplay_mod_mask &= ~_ctrl
+                        elif payload.startswith("M:ALT:"):
+                            _alt = getattr(_renplay_pg, "KMOD_LALT", 0x0100)
+                            if payload.endswith(":1"):
+                                _renplay_mod_mask |= _alt
+                            else:
+                                _renplay_mod_mask &= ~_alt
+                except Exception:
+                    pass
+
+            if _renplay_pg is not None and _renplay_c_consume_mouse is not None:
+                try:
+                    pw, ph = renpy.get_physical_size()
+                    while int(_renplay_c_consume_mouse(
+                        _renplay_ctypes.byref(_renplay_mx),
+                        _renplay_ctypes.byref(_renplay_my),
+                        _renplay_ctypes.byref(_renplay_mbtn),
+                        _renplay_ctypes.byref(_renplay_mtype),
+                    )) != 0:
+                        px = int(max(0.0, min(1.0, float(_renplay_mx.value))) * max(1, int(pw)))
+                        py = int(max(0.0, min(1.0, float(_renplay_my.value))) * max(1, int(ph)))
+                        etype = int(_renplay_mtype.value)
+                        btn = int(_renplay_mbtn.value)
+                        if etype == 0:
+                            _renplay_pg.event.post(_renplay_pg.event.Event(
+                                _renplay_pg.MOUSEMOTION,
+                                pos=(px, py),
+                                rel=(0, 0),
+                                buttons=(0, 0, 0),
+                            ))
+                        elif etype == 1:
+                            _renplay_pg.event.post(_renplay_pg.event.Event(
+                                _renplay_pg.MOUSEBUTTONDOWN,
+                                pos=(px, py),
+                                button=btn,
+                            ))
+                        elif etype == 2:
+                            _renplay_pg.event.post(_renplay_pg.event.Event(
+                                _renplay_pg.MOUSEBUTTONUP,
+                                pos=(px, py),
+                                button=btn,
+                            ))
+                except Exception:
+                    pass
+
+            if _renplay_c_consume_rpc is not None:
+                try:
+                    while True:
+                        rn = int(_renplay_c_consume_rpc(_renplay_rpc_buf, 16384))
+                        if rn <= 0:
+                            break
+                        raw_req = _renplay_rpc_buf.raw[:rn].decode("utf-8", "replace")
+                        _renplay_handle_rpc(_renplay_json.loads(raw_req))
                 except Exception:
                     pass
 
@@ -913,6 +1384,8 @@ public final class EngineLauncher {
             if cmd == 0:
                 return
             if cmd == 10:
+                seen, total = _renplay_collect_dialogue_counts()
+                _renplay_write_stats_file(seen, total)
                 try:
                     renpy.loadsave.save_persistent()
                 except Exception:

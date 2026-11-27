@@ -186,7 +186,7 @@ struct SMBBrowserView: View {
                     if scanner.discoveredHosts.isEmpty {
                         HStack(spacing: 10) {
                             ProgressView()
-                            Text("Searching local network for SMB shares...")
+                            Text("Searching local network...")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
@@ -221,7 +221,7 @@ struct SMBBrowserView: View {
                     Text("Discovered on LAN")
                 }
             }
-            .navigationTitle("SMB / LAN Shares")
+            .navigationTitle("Network Shares")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -331,15 +331,15 @@ private struct SMBServerEditorSheet: View {
                         if isTesting {
                             HStack {
                                 ProgressView()
-                                Text("Testing Connection...")
+                                Text("Connecting...")
                             }
                         } else {
-                            Text("Test & Save")
+                            Text("Connect & Save")
                         }
                     }
                     .disabled(trimmedHost.isEmpty || isTesting)
 
-                    Button("Save Without Testing") {
+                    Button("Save Offline") {
                         testAndSave(verifyFirst: false)
                     }
                     .disabled(trimmedHost.isEmpty || isTesting)
@@ -559,26 +559,47 @@ private struct SMBFolderBrowserView: View {
         return path.split(separator: "/").last.map(String.init) ?? share
     }
 
+    private var existingLibraryGame: GameEntry? {
+        let normalized = SMBClient.normalizeRelativePath(path)
+        return appState.games.first {
+            $0.remoteSource?.host == server.host
+                && $0.remoteSource?.share == share
+                && $0.remoteSource?.remotePath == normalized
+        }
+    }
+
     var body: some View {
         List {
             if !isLoading && looksLikeGameHere {
                 Section {
-                    Button {
-                        streamFolder(remotePath: path, preferredName: folderTitle)
-                    } label: {
-                        Label("Stream This Game from LAN (No Download)", systemImage: "play.tv.fill")
-                            .font(.headline)
+                    if let existing = existingLibraryGame {
+                        HStack {
+                            Label("Added to Library", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Spacer()
+                            Button("Sync Scripts") {
+                                Task { await appState.refreshRemoteSMBGame(existing) }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(appState.isImporting)
+                        }
+                    } else {
+                        Button {
+                            streamFolder(remotePath: path, preferredName: folderTitle)
+                        } label: {
+                            Label("Add to Library", systemImage: "plus.circle.fill")
+                                .font(.headline)
+                        }
+                        .disabled(appState.isImporting)
                     }
-                    .disabled(appState.isImporting)
-                } footer: {
-                    Text("Only scripts and archive indexes are synced. Images, audio, and videos stream directly over SMB.")
                 }
             }
 
             if isLoading {
                 HStack(spacing: 10) {
                     ProgressView()
-                    Text("Listing folder...")
+                    Text("Loading...")
                         .foregroundStyle(.secondary)
                 }
             } else if let errorMessage {
@@ -610,7 +631,7 @@ private struct SMBFolderBrowserView: View {
                                 Label(item.name, systemImage: "folder.fill")
                             }
                             .contextMenu {
-                                Button("Stream Folder as Game", systemImage: "play.tv") {
+                                Button("Add to Library", systemImage: "plus.circle") {
                                     streamFolder(remotePath: item.relativePath, preferredName: item.name)
                                 }
                             }
@@ -637,7 +658,7 @@ private struct SMBFolderBrowserView: View {
                     VStack(spacing: 12) {
                         ProgressView(value: appState.importProgress)
                             .progressViewStyle(.linear)
-                        Text("Preparing SMB Stream")
+                        Text("Adding to Library")
                             .font(.headline)
                         Text(appState.importStatus)
                             .font(.caption)

@@ -122,6 +122,32 @@ public enum RenPyVersionDetector {
         return nil
     }
 
+    public static func parseGameVersion(in gameRoot: URL) -> String? {
+        parseOptionsValue(in: gameRoot, pattern: #"(?m)^\s*(?:define\s+)?config\.version\s*=\s*(?:_\(\s*)?[ru]?["']([^"'\n]+)["']"#)
+    }
+
+    public static func parseConfiguredSaveDirName(in gameRoot: URL) -> String? {
+        parseOptionsValue(in: gameRoot, pattern: #"(?m)^\s*(?:define\s+)?config\.save_directory\s*=\s*[ru]?["']([^"'\n]+)["']"#)
+    }
+
+    private static func parseOptionsValue(in gameRoot: URL, pattern: String) -> String? {
+        let optionsURL = gameRoot.appendingPathComponent("game/options.rpy")
+        guard let fh = try? FileHandle(forReadingFrom: optionsURL),
+              let data = try? fh.read(upToCount: 262_144) else {
+            return nil
+        }
+        try? fh.close()
+        let text = String(decoding: data, as: UTF8.self)
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              match.numberOfRanges >= 2,
+              let range = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        let cleaned = text[range].trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
     static func parseVersionTuple(in text: String) -> SemVer? {
         // Ren'Py <= 8.1 writes version_tuple; 8.2+ vc_version.py only carries version = '8.x.y.build'.
         let patterns = [

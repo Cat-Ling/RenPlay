@@ -5,6 +5,8 @@
 import Darwin
 import Foundation
 import Observation
+import PhotosUI
+import RenPlayCore
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -159,10 +161,30 @@ struct SideloadDocumentPicker: UIViewControllerRepresentable {
     }
 }
 
+struct WiFiTransferJob: Identifiable, Sendable, Codable, Equatable {
+    enum Phase: String, Sendable, Codable {
+        case receiving
+        case importing
+        case completed
+        case failed
+    }
+
+    let id: String
+    let filename: String
+    var totalBytes: Int64
+    var receivedBytes: Int64
+    var phase: Phase
+    var progress: Double
+    var message: String
+    var gameTitle: String?
+    var engineVersion: String?
+}
+
 private final class UploadSocketHolder: @unchecked Sendable {
     private let lock = NSLock()
     private var fd: Int32 = -1
     private var stopped = false
+    private var snapshotJSON = Data("{\"jobs\":[]}".utf8)
 
     func set(_ newFD: Int32) {
         lock.lock()
@@ -189,6 +211,19 @@ private final class UploadSocketHolder: @unchecked Sendable {
         lock.unlock()
         return v
     }
+
+    func setStatusSnapshot(_ data: Data) {
+        lock.lock()
+        snapshotJSON = data
+        lock.unlock()
+    }
+
+    func getStatusSnapshot() -> Data {
+        lock.lock()
+        let data = snapshotJSON
+        lock.unlock()
+        return data
+    }
 }
 
 private final class WeakUploadServerRef: @unchecked Sendable {
@@ -203,17 +238,21 @@ private final class WeakUploadServerRef: @unchecked Sendable {
 final class LocalWiFiUploadServer {
     var serverURLString: String?
     var statusText: String = "Starting server..."
-    var uploadedCount: Int = 0
+    var jobs: [WiFiTransferJob] = []
     var errorMessage: String?
 
     private let socketHolder = UploadSocketHolder()
-    private var onUploadedFile: ((URL) -> Void)?
+    private var onImportUpload: ((URL, @escaping @Sendable (Double, String) -> Void) async -> Result<GameEntry, Error>)?
 
-    func start(onUploadedFile: @escaping (URL) -> Void) {
+    func start(
+        onImportUpload: @escaping (URL, @escaping @Sendable (Double, String) -> Void) async -> Result<GameEntry, Error>
+    ) {
         stop()
-        self.onUploadedFile = onUploadedFile
+        self.onImportUpload = onImportUpload
         self.errorMessage = nil
-        self.statusText = "Starting local server..."
+        self.statusText = "Starting server..."
+        self.jobs = []
+        syncStatusSnapshot()
 
         let holder = socketHolder
         let ip = Self.localIPv4Address() ?? "127.0.0.1"
@@ -223,7 +262,7 @@ final class LocalWiFiUploadServer {
             let listenFD = Darwin.socket(AF_INET, SOCK_STREAM, 0)
             guard listenFD >= 0 else {
                 Task { @MainActor in
-                    weakRef.server?.errorMessage = "Could not create TCP socket."
+                    weakRef.server?.errorMessage = "Could not create local socket."
                 }
                 return
             }
@@ -238,7 +277,7 @@ final class LocalWiFiUploadServer {
                 } else {
                     Darwin.close(listenFD)
                     Task { @MainActor in
-                        weakRef.server?.errorMessage = "Could not bind a local port for Wi-Fi upload."
+                        weakRef.server?.errorMessage = "Could not bind a local port."
                     }
                     return
                 }
@@ -247,7 +286,7 @@ final class LocalWiFiUploadServer {
             guard Darwin.listen(listenFD, 8) == 0 else {
                 Darwin.close(listenFD)
                 Task { @MainActor in
-                    weakRef.server?.errorMessage = "Could not listen on local port \(boundPort)."
+                    weakRef.server?.errorMessage = "Could not listen on port \(boundPort)."
                 }
                 return
             }
@@ -256,7 +295,7 @@ final class LocalWiFiUploadServer {
             let urlStr = "http://\(ip):\(boundPort)"
             Task { @MainActor in
                 weakRef.server?.serverURLString = urlStr
-                weakRef.server?.statusText = "Ready for upload"
+                weakRef.server?.statusText = "Waiting for files"
             }
 
             while !holder.isStopped() {
@@ -274,18 +313,30 @@ final class LocalWiFiUploadServer {
                     break
                 }
                 DispatchQueue.global(qos: .utility).async {
-                    Self.handleClient(clientFD) { status in
-                        Task { @MainActor in
-                            weakRef.server?.statusText = status
+                    Self.handleClient(
+                        clientFD,
+                        statusSnapshotProvider: { holder.getStatusSnapshot() },
+                        onReceiveStart: { jobID, filename, total in
+                            Task { @MainActor in
+                                weakRef.server?.recordReceiveStart(id: jobID, filename: filename, totalBytes: total)
+                            }
+                        },
+                        onReceiveProgress: { jobID, received, total in
+                            Task { @MainActor in
+                                weakRef.server?.recordReceiveProgress(id: jobID, receivedBytes: received, totalBytes: total)
+                            }
+                        },
+                        onReceiveFailed: { jobID, reason in
+                            Task { @MainActor in
+                                weakRef.server?.recordFailure(id: jobID, message: reason)
+                            }
+                        },
+                        onComplete: { jobID, uploadedURL in
+                            Task { @MainActor in
+                                await weakRef.server?.handleUploadedFile(id: jobID, tempURL: uploadedURL)
+                            }
                         }
-                    } onComplete: { uploadedURL in
-                        Task { @MainActor in
-                            guard let server = weakRef.server else { return }
-                            server.uploadedCount += 1
-                            server.statusText = "Received \(uploadedURL.lastPathComponent)"
-                            server.onUploadedFile?(uploadedURL)
-                        }
-                    }
+                    )
                 }
             }
         }
@@ -294,6 +345,84 @@ final class LocalWiFiUploadServer {
     func stop() {
         socketHolder.stop()
         serverURLString = nil
+    }
+
+    private func recordReceiveStart(id: String, filename: String, totalBytes: Int64) {
+        let job = WiFiTransferJob(
+            id: id,
+            filename: filename,
+            totalBytes: totalBytes,
+            receivedBytes: 0,
+            phase: .receiving,
+            progress: 0,
+            message: "Uploading..."
+        )
+        jobs.insert(job, at: 0)
+        statusText = "Receiving \(filename)"
+        syncStatusSnapshot()
+    }
+
+    private func recordReceiveProgress(id: String, receivedBytes: Int64, totalBytes: Int64) {
+        guard let idx = jobs.firstIndex(where: { $0.id == id }) else { return }
+        jobs[idx].receivedBytes = receivedBytes
+        jobs[idx].progress = totalBytes > 0 ? min(1.0, Double(receivedBytes) / Double(totalBytes)) : 0
+        syncStatusSnapshot()
+    }
+
+    private func recordFailure(id: String, message: String) {
+        if let idx = jobs.firstIndex(where: { $0.id == id }) {
+            jobs[idx].phase = .failed
+            jobs[idx].message = message
+        }
+        statusText = "Transfer failed"
+        syncStatusSnapshot()
+    }
+
+    private func handleUploadedFile(id: String, tempURL: URL) async {
+        if let idx = jobs.firstIndex(where: { $0.id == id }) {
+            jobs[idx].phase = .importing
+            jobs[idx].progress = 0.02
+            jobs[idx].receivedBytes = jobs[idx].totalBytes
+            jobs[idx].message = "Extracting archive..."
+        }
+        statusText = "Importing \(tempURL.lastPathComponent)..."
+        syncStatusSnapshot()
+
+        guard let onImportUpload else { return }
+        let weakRef = WeakUploadServerRef(self)
+        let result = await onImportUpload(tempURL) { frac, msg in
+            Task { @MainActor in
+                guard let server = weakRef.server,
+                      let idx = server.jobs.firstIndex(where: { $0.id == id }) else { return }
+                server.jobs[idx].phase = .importing
+                server.jobs[idx].progress = frac
+                server.jobs[idx].message = msg
+                server.syncStatusSnapshot()
+            }
+        }
+
+        guard let idx = jobs.firstIndex(where: { $0.id == id }) else { return }
+        switch result {
+        case .success(let entry):
+            jobs[idx].phase = .completed
+            jobs[idx].progress = 1.0
+            jobs[idx].gameTitle = entry.displayName
+            jobs[idx].engineVersion = entry.detectedEngineVersion
+            jobs[idx].message = "Added to Library"
+            statusText = "Added \(entry.displayName)"
+        case .failure(let error):
+            jobs[idx].phase = .failed
+            jobs[idx].message = error.localizedDescription
+            statusText = "Import failed"
+        }
+        syncStatusSnapshot()
+    }
+
+    private func syncStatusSnapshot() {
+        let payload = ["jobs": jobs]
+        if let data = try? JSONEncoder().encode(payload) {
+            socketHolder.setStatusSnapshot(data)
+        }
     }
 
     nonisolated private static func bindSocket(_ fd: Int32, port: UInt16) -> Bool {
@@ -323,8 +452,11 @@ final class LocalWiFiUploadServer {
 
     nonisolated private static func handleClient(
         _ fd: Int32,
-        onStatus: @escaping @Sendable (String) -> Void,
-        onComplete: @escaping @Sendable (URL) -> Void
+        statusSnapshotProvider: () -> Data,
+        onReceiveStart: @escaping @Sendable (String, String, Int64) -> Void,
+        onReceiveProgress: @escaping @Sendable (String, Int64, Int64) -> Void,
+        onReceiveFailed: @escaping @Sendable (String, String) -> Void,
+        onComplete: @escaping @Sendable (String, URL) -> Void
     ) {
         defer { Darwin.close(fd) }
 
@@ -358,7 +490,12 @@ final class LocalWiFiUploadServer {
         let rawTarget = String(parts[1])
 
         if method == "GET" {
-            sendHTTP(fd, status: "200 OK", contentType: "text/html; charset=utf-8", body: Data(uploadHTML.utf8))
+            let pathOnly = rawTarget.components(separatedBy: "?").first ?? rawTarget
+            if pathOnly == "/status" {
+                sendHTTP(fd, status: "200 OK", contentType: "application/json", body: statusSnapshotProvider())
+            } else {
+                sendHTTP(fd, status: "200 OK", contentType: "text/html; charset=utf-8", body: Data(uploadHTML.utf8))
+            }
             return
         }
 
@@ -383,9 +520,12 @@ final class LocalWiFiUploadServer {
             return
         }
 
-        let encodedName = String(rawTarget.dropFirst("/upload/".count)).components(separatedBy: "?").first ?? "upload.zip"
+        let pathAndQuery = String(rawTarget.dropFirst("/upload/".count)).components(separatedBy: "?")
+        let encodedName = pathAndQuery.first ?? "upload.zip"
         let decodedName = encodedName.removingPercentEncoding ?? encodedName
         let safeName = sanitizeUploadFilename(decodedName)
+        let jobID = extractQueryParam(name: "id", from: pathAndQuery.dropFirst().first ?? "") ?? UUID().uuidString
+
         let stageDir = FileManager.default.temporaryDirectory.appendingPathComponent("renplay-wifi-\(UUID().uuidString)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: stageDir, withIntermediateDirectories: true)
@@ -394,15 +534,19 @@ final class LocalWiFiUploadServer {
             let fileHandle = try FileHandle(forWritingTo: destURL)
             defer { try? fileHandle.close() }
 
-            onStatus("Receiving \(safeName)...")
+            onReceiveStart(jobID, safeName, contentLength)
             let initialBody = headerData[headerEndRange.upperBound...]
+            var received: Int64 = 0
             var remaining = contentLength
+            var lastProgressEmit = CFAbsoluteTimeGetCurrent()
+
             if !initialBody.isEmpty {
                 let toWrite = Int(min(Int64(initialBody.count), remaining))
                 if toWrite > 0 {
                     let slice = Data(initialBody.prefix(toWrite))
                     try fileHandle.write(contentsOf: slice)
                     remaining -= Int64(toWrite)
+                    received += Int64(toWrite)
                 }
             }
 
@@ -415,18 +559,37 @@ final class LocalWiFiUploadServer {
                 }
                 try fileHandle.write(contentsOf: buf[..<n])
                 remaining -= Int64(n)
+                received += Int64(n)
+                let now = CFAbsoluteTimeGetCurrent()
+                if now - lastProgressEmit >= 0.15 {
+                    lastProgressEmit = now
+                    onReceiveProgress(jobID, received, contentLength)
+                }
             }
 
-            sendHTTP(fd, status: "200 OK", contentType: "application/json", body: Data("{\"ok\":true}".utf8))
-            onComplete(destURL)
+            let okBody = (try? JSONEncoder().encode(["id": jobID])) ?? Data("{\"ok\":true}".utf8)
+            sendHTTP(fd, status: "200 OK", contentType: "application/json", body: okBody)
+            onComplete(jobID, destURL)
         } catch {
             try? FileManager.default.removeItem(at: stageDir)
+            onReceiveFailed(jobID, error.localizedDescription)
             sendHTTP(fd, status: "500 Internal Server Error", contentType: "text/plain", body: Data(error.localizedDescription.utf8))
         }
     }
 
+    nonisolated private static func extractQueryParam(name: String, from query: String) -> String? {
+        for pair in query.split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1)
+            if kv.count == 2 && kv[0] == name {
+                let raw = String(kv[1]).removingPercentEncoding ?? String(kv[1])
+                return raw.isEmpty ? nil : raw
+            }
+        }
+        return nil
+    }
+
     nonisolated private static func sendHTTP(_ fd: Int32, status: String, contentType: String, body: Data) {
-        let header = "HTTP/1.1 \(status)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+        let header = "HTTP/1.1 \(status)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
         var payload = Data(header.utf8)
         payload.append(body)
         payload.withUnsafeBytes { rawBuf in
@@ -490,52 +653,114 @@ final class LocalWiFiUploadServer {
     <head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
-      <title>RenPlay Wi-Fi Upload</title>
+      <title>RenPlay Wi-Fi Transfer</title>
       <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 560px; margin: 40px auto; padding: 0 16px; background: #111; color: #f5f5f5; }
-        .box { border: 2px dashed #555; border-radius: 12px; padding: 24px; text-align: center; background: #1b1b1e; }
-        input[type=file] { margin: 16px 0; }
-        button { background: #0a84ff; color: #fff; border: 0; border-radius: 8px; padding: 10px 18px; font-size: 15px; cursor: pointer; }
-        progress { width: 100%; height: 18px; margin-top: 14px; display: none; }
-        #status { margin-top: 12px; font-size: 14px; color: #b5b5bd; }
+        :root { color-scheme: dark; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 600px; margin: 36px auto; padding: 0 16px; background: #0d0e12; color: #f5f5f7; }
+        h2 { margin: 0 0 6px; font-size: 22px; }
+        p { margin: 0 0 18px; color: #9a9aa6; font-size: 14px; }
+        .drop { border: 1.5px dashed #3a3f4b; border-radius: 14px; padding: 26px 18px; text-align: center; background: #161821; transition: border-color .15s, background .15s; }
+        .drop.over { border-color: #0a84ff; background: #162133; }
+        .actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 12px; }
+        button { background: #0a84ff; color: #fff; border: 0; border-radius: 10px; padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer; }
+        button.secondary { background: #262936; }
+        button:disabled { opacity: .5; cursor: default; }
+        #jobs { margin-top: 20px; display: flex; flex-direction: column; gap: 10px; }
+        .job { background: #161821; border: 1px solid #242734; border-radius: 12px; padding: 12px 14px; }
+        .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 14px; }
+        .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .pill { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: #252836; color: #b5b8c5; white-space: nowrap; }
+        .pill.ok { background: rgba(48,209,88,.18); color: #30d158; }
+        .pill.err { background: rgba(255,69,58,.18); color: #ff453a; }
+        .pill.work { background: rgba(10,132,255,.18); color: #409cff; }
+        progress { width: 100%; height: 6px; margin-top: 10px; border-radius: 999px; overflow: hidden; accent-color: #0a84ff; }
+        .sub { margin-top: 6px; font-size: 12px; color: #9a9aa6; }
       </style>
     </head>
     <body>
-      <h2>RenPlay Wi-Fi Upload</h2>
-      <p>Upload a Ren'Py game archive (<code>.zip</code>, <code>.7z</code>, <code>.rar</code>, <code>.apk</code>, <code>.tar.xz</code>, <code>.tar.zst</code>, <code>.tar.gz</code>) directly into RenPlay.</p>
-      <div class="box">
-        <input id="file" type="file" multiple>
-        <br>
-        <button id="btn">Upload Selected Files</button>
-        <progress id="prog" max="100" value="0"></progress>
-        <div id="status">Idle</div>
+      <h2>RenPlay Wi-Fi Transfer</h2>
+      <p>Supports .zip, .apk, .7z, .rar, .tar.xz, .tar.zst, and .tar.bz2 archives.</p>
+      <div id="drop" class="drop">
+        <div>Drop game archives here or choose files</div>
+        <input id="file" type="file" multiple hidden>
+        <div class="actions">
+          <button id="pick" type="button" class="secondary">Choose Files</button>
+          <button id="btn" type="button">Upload</button>
+        </div>
       </div>
+      <div id="jobs"></div>
       <script>
         const fileEl = document.getElementById('file');
+        const pickBtn = document.getElementById('pick');
         const btn = document.getElementById('btn');
-        const prog = document.getElementById('prog');
-        const statusEl = document.getElementById('status');
+        const drop = document.getElementById('drop');
+        const jobsEl = document.getElementById('jobs');
+        let pendingFiles = [];
+        let pollTimer = null;
+
+        pickBtn.onclick = () => fileEl.click();
+        fileEl.onchange = () => { pendingFiles = Array.from(fileEl.files || []); btn.textContent = pendingFiles.length ? 'Upload (' + pendingFiles.length + ')' : 'Upload'; };
+        drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+        drop.ondragleave = () => drop.classList.remove('over');
+        drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); pendingFiles = Array.from(e.dataTransfer.files || []); btn.textContent = pendingFiles.length ? 'Upload (' + pendingFiles.length + ')' : 'Upload'; };
+
+        function fmtBytes(b) {
+          if (!b) return '0 B';
+          const u = ['B','KB','MB','GB'];
+          const i = Math.min(3, Math.floor(Math.log(b) / Math.log(1024)));
+          return (b / Math.pow(1024, i)).toFixed(i ? 1 : 0) + ' ' + u[i];
+        }
+
+        function esc(s) {
+          return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+
+        async function refreshStatus() {
+          try {
+            const res = await fetch('/status', { cache: 'no-store' });
+            if (!res.ok) return;
+            const data = await res.json();
+            const list = data.jobs || [];
+            jobsEl.innerHTML = list.map(j => {
+              const pct = Math.round((j.progress || 0) * 100);
+              let cls = 'work';
+              let badge = (j.phase === 'importing' ? 'Importing ' : 'Uploading ') + pct + '%';
+              if (j.phase === 'completed') { cls = 'ok'; badge = 'Added'; }
+              if (j.phase === 'failed') { cls = 'err'; badge = 'Failed'; }
+              const title = j.gameTitle ? j.gameTitle + (j.engineVersion ? ' • v' + j.engineVersion : '') : j.message;
+              const bar = (j.phase === 'receiving' || j.phase === 'importing') ? '<progress max="100" value="' + pct + '"></progress>' : '';
+              return '<div class="job"><div class="row"><div class="name">' + esc(j.filename) + '</div><div class="pill ' + cls + '">' + esc(badge) + '</div></div>' + bar + '<div class="sub">' + fmtBytes(j.totalBytes) + ' • ' + esc(title) + '</div></div>';
+            }).join('');
+            const active = list.some(j => j.phase === 'receiving' || j.phase === 'importing');
+            if (!active && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+          } catch (_) {}
+        }
+
+        function ensurePolling() {
+          if (!pollTimer) pollTimer = setInterval(refreshStatus, 400);
+        }
+
         btn.onclick = async () => {
-          if (!fileEl.files.length) return;
+          if (!pendingFiles.length) { fileEl.click(); return; }
           btn.disabled = true;
-          prog.style.display = 'block';
-          for (const f of fileEl.files) {
-            statusEl.textContent = 'Uploading ' + f.name + '...';
-            await new Promise((resolve, reject) => {
+          ensurePolling();
+          for (const f of pendingFiles) {
+            const id = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
+            await new Promise((resolve) => {
               const xhr = new XMLHttpRequest();
-              xhr.open('PUT', '/upload/' + encodeURIComponent(f.name));
-              xhr.upload.onprogress = (e) => {
-                if (e.lengthComputable) prog.value = Math.round((e.loaded / e.total) * 100);
-              };
-              xhr.onload = () => xhr.status < 300 ? resolve() : reject(new Error(xhr.responseText || ('HTTP ' + xhr.status)));
-              xhr.onerror = () => reject(new Error('Network error'));
+              xhr.open('PUT', '/upload/' + encodeURIComponent(f.name) + '?id=' + encodeURIComponent(id));
+              xhr.onload = () => { refreshStatus(); resolve(); };
+              xhr.onerror = () => { refreshStatus(); resolve(); };
               xhr.send(f);
-            }).catch(err => { statusEl.textContent = 'Error: ' + err.message; throw err; });
+            });
           }
-          prog.value = 100;
-          statusEl.textContent = 'Upload finished. RenPlay is importing...';
+          pendingFiles = [];
+          fileEl.value = '';
+          btn.textContent = 'Upload';
           btn.disabled = false;
+          refreshStatus();
         };
+        refreshStatus();
       </script>
     </body>
     </html>
@@ -550,20 +775,27 @@ struct WiFiUploadSheetView: View {
 
     var body: some View {
         NavigationStack {
-            Form {
+            List {
                 Section {
                     if let url = server.serverURLString {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(url)
-                                .font(.title3.monospaced().weight(.semibold))
-                                .textSelection(.enabled)
-                            Button(copiedAddress ? "Copied" : "Copy Server URL") {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(url)
+                                    .font(.headline.monospaced())
+                                    .textSelection(.enabled)
+                                Text(server.statusText)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button(copiedAddress ? "Copied" : "Copy") {
                                 UIPasteboard.general.string = url
                                 copiedAddress = true
                             }
                             .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
                         }
-                        .padding(.vertical, 4)
+                        .padding(.vertical, 2)
                     } else if let err = server.errorMessage {
                         Text(err)
                             .foregroundStyle(.red)
@@ -571,27 +803,43 @@ struct WiFiUploadSheetView: View {
                         ProgressView(server.statusText)
                     }
                 } header: {
-                    Text("Open in Desktop or Device Browser")
+                    Text("Browser Address")
                 } footer: {
-                    Text("Keep this screen open until the upload finishes. Uploaded archives import automatically.")
+                    Text("Keep this sheet open while transferring files. Imports start automatically once uploaded.")
                 }
 
-                Section {
-                    HStack {
-                        Text("Status")
-                        Spacer()
-                        Text(server.statusText)
+                Section("Transfers") {
+                    if server.jobs.isEmpty {
+                        Text("No transfers yet")
                             .foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Text("Files Received")
-                        Spacer()
-                        Text("\(server.uploadedCount)")
-                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(server.jobs) { job in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text(job.filename)
+                                        .font(.subheadline.weight(.medium))
+                                        .lineLimit(1)
+                                    Spacer()
+                                    phaseBadge(for: job)
+                                }
+                                if job.phase == .receiving || job.phase == .importing {
+                                    ProgressView(value: job.progress)
+                                }
+                                HStack {
+                                    Text(ByteCountFormatter.string(fromByteCount: job.totalBytes, countStyle: .file))
+                                    Text("•")
+                                    Text(jobSubtitle(for: job))
+                                        .lineLimit(1)
+                                }
+                                .font(.caption)
+                                .foregroundStyle(job.phase == .failed ? .red : .secondary)
+                            }
+                            .padding(.vertical, 2)
+                        }
                     }
                 }
             }
-            .navigationTitle("Wi-Fi Upload")
+            .navigationTitle("Wi-Fi Transfer")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -599,13 +847,48 @@ struct WiFiUploadSheetView: View {
                 }
             }
             .onAppear {
-                server.start { tempURL in
-                    appState.importFiles([tempURL], deleteSourceAfterImport: true)
+                server.start { tempURL, progress in
+                    await appState.importUploadedArchive(at: tempURL, progress: progress)
                 }
             }
             .onDisappear {
                 server.stop()
             }
+        }
+    }
+
+    @ViewBuilder
+    private func phaseBadge(for job: WiFiTransferJob) -> some View {
+        switch job.phase {
+        case .receiving:
+            Text("Uploading \(Int(job.progress * 100))%")
+                .font(.caption2.monospacedDigit().weight(.semibold))
+                .foregroundStyle(.blue)
+        case .importing:
+            Text("Importing \(Int(job.progress * 100))%")
+                .font(.caption2.monospacedDigit().weight(.semibold))
+                .foregroundStyle(.blue)
+        case .completed:
+            Label("Added", systemImage: "checkmark.circle.fill")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.green)
+        case .failed:
+            Label("Failed", systemImage: "xmark.circle.fill")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.red)
+        }
+    }
+
+    private func jobSubtitle(for job: WiFiTransferJob) -> String {
+        switch job.phase {
+        case .completed:
+            let title = job.gameTitle ?? job.filename
+            if let ver = job.engineVersion {
+                return "\(title) • Ren'Py \(ver)"
+            }
+            return title
+        default:
+            return job.message
         }
     }
 }
@@ -624,13 +907,13 @@ struct URLDownloadSheetView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 } header: {
-                    Text("Direct Archive URL")
+                    Text("Archive URL")
                 } footer: {
-                    Text("Supports direct http/https links to .zip, .7z, .rar, .apk, .tar.xz, .tar.zst, or .tar.gz archives.")
+                    Text("Supports direct links to .zip, .7z, .rar, .apk, .tar.xz, .tar.zst, and .tar.gz files.")
                 }
 
                 Section {
-                    Button("Download and Import") {
+                    Button("Download & Import") {
                         let value = urlText
                         dismiss()
                         appState.downloadAndImport(urlString: value)
@@ -644,6 +927,38 @@ struct URLDownloadSheetView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel") { dismiss() }
                 }
+            }
+        }
+    }
+}
+
+struct ArtworkPhotoPicker: View {
+    let title: String
+    let hasCustomImage: Bool
+    let onSelectData: (Data) -> Void
+    let onReset: () -> Void
+
+    @State private var selectedItem: PhotosPickerItem?
+
+    var body: some View {
+        HStack {
+            PhotosPicker(selection: $selectedItem, matching: .images) {
+                Label(title, systemImage: "photo")
+            }
+            .onChange(of: selectedItem) { _, item in
+                guard let item else { return }
+                Task {
+                    if let data = try? await item.loadTransferable(type: Data.self) {
+                        onSelectData(data)
+                    }
+                    selectedItem = nil
+                }
+            }
+
+            if hasCustomImage {
+                Spacer()
+                Button("Reset", role: .destructive, action: onReset)
+                    .buttonStyle(.borderless)
             }
         }
     }
