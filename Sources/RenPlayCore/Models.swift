@@ -120,6 +120,71 @@ public struct GameSettings: Codable, Sendable, Hashable {
     }
 }
 
+public struct SMBServerProfile: Codable, Sendable, Identifiable, Hashable {
+    public var id: UUID
+    public var displayName: String
+    public var host: String
+    public var port: Int
+    public var username: String
+    public var domain: String
+    public var isGuest: Bool
+    public var createdAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        displayName: String,
+        host: String,
+        port: Int = 445,
+        username: String = "",
+        domain: String = "",
+        isGuest: Bool = true,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.host = host
+        self.port = port
+        self.username = username
+        self.domain = domain
+        self.isGuest = isGuest
+        self.createdAt = createdAt
+    }
+}
+
+public struct SMBGameSource: Codable, Sendable, Equatable, Hashable {
+    public var serverID: UUID
+    public var host: String
+    public var port: Int
+    public var share: String
+    public var remotePath: String
+    public var username: String
+    public var domain: String
+    public var isGuest: Bool
+    public var lastSyncedAt: Date
+
+    public init(
+        serverID: UUID,
+        host: String,
+        port: Int = 445,
+        share: String,
+        remotePath: String,
+        username: String = "",
+        domain: String = "",
+        isGuest: Bool = true,
+        lastSyncedAt: Date = Date()
+    ) {
+        self.serverID = serverID
+        self.host = host
+        self.port = port
+        self.share = share
+        self.remotePath = remotePath
+        self.username = username
+        self.domain = domain
+        self.isGuest = isGuest
+        self.lastSyncedAt = lastSyncedAt
+    }
+}
+
 public struct GameEntry: Codable, Sendable, Identifiable, Hashable {
     public var id: UUID
     public var displayName: String
@@ -130,6 +195,7 @@ public struct GameEntry: Codable, Sendable, Identifiable, Hashable {
     public var lastPlayedAt: Date?
     public var playTimeSeconds: TimeInterval
     public var settings: GameSettings
+    public var remoteSource: SMBGameSource?
 
     public init(
         id: UUID = UUID(),
@@ -140,7 +206,8 @@ public struct GameEntry: Codable, Sendable, Identifiable, Hashable {
         importedAt: Date = Date(),
         lastPlayedAt: Date? = nil,
         playTimeSeconds: TimeInterval = 0,
-        settings: GameSettings = GameSettings()
+        settings: GameSettings = GameSettings(),
+        remoteSource: SMBGameSource? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -151,6 +218,7 @@ public struct GameEntry: Codable, Sendable, Identifiable, Hashable {
         self.lastPlayedAt = lastPlayedAt
         self.playTimeSeconds = playTimeSeconds
         self.settings = settings
+        self.remoteSource = remoteSource
     }
 }
 

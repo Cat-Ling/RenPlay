@@ -94,7 +94,11 @@ struct GameDetailView: View {
                 }
 
                 NavigationLink {
-                    AssetGalleryView(gameDir: appState.libraryStore.gameDirectory(for: game))
+                    AssetGalleryView(
+                        gameDir: appState.libraryStore.gameDirectory(for: game),
+                        remoteSource: game.remoteSource,
+                        remotePassword: game.remoteSource.map { appState.libraryStore.smbPassword(for: $0.serverID) } ?? ""
+                    )
                 } label: {
                     Label("Asset Gallery", systemImage: "photo.on.rectangle.angled")
                 }
@@ -106,6 +110,27 @@ struct GameDetailView: View {
                 }
             } header: {
                 Text("Tools")
+            }
+
+            if let remote = game.remoteSource {
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("smb://\(remote.host):\(remote.port)/\(remote.share)/\(remote.remotePath)")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                        Text("Last synced: \(remote.lastSyncedAt.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button {
+                        Task { await appState.refreshRemoteSMBGame(game) }
+                    } label: {
+                        Label("Refresh Remote Scripts & Index", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .disabled(appState.isImporting)
+                } header: {
+                    Text("LAN Stream Source")
+                }
             }
 
             Section {

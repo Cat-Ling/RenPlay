@@ -10,6 +10,7 @@ private struct AssetItem: Identifiable, Hashable {
     enum Source: Hashable {
         case loose(URL)
         case rpa(archiveURL: URL, entryPath: String)
+        case smb(entry: SMBIndexEntry, source: SMBGameSource, password: String)
     }
     enum Kind: String {
         case image = "Images"
@@ -27,6 +28,8 @@ private struct AssetItem: Identifiable, Hashable {
             return try? Data(contentsOf: url)
         case .rpa(let archiveURL, let entryPath):
             return (try? RPAArchive(fileURL: archiveURL))?.readEntryOrNil(entryPath)
+        case .smb(let entry, let remoteSource, let password):
+            return try? SMBClient.readManifestEntry(entry, source: remoteSource, password: password)
         }
     }
 }
@@ -39,6 +42,8 @@ private extension RPAArchive {
 
 struct AssetGalleryView: View {
     let gameDir: URL
+    var remoteSource: SMBGameSource? = nil
+    var remotePassword: String = ""
 
     @State private var assets: [AssetItem] = []
     @State private var filterKind: AssetItem.Kind = .image
@@ -161,6 +166,8 @@ struct AssetGalleryView: View {
 
     private func scanAssets() async {
         let dir = gameDir
+        let smbSource = remoteSource
+        let smbPass = remotePassword
         let found = await Task.detached(priority: .userInitiated) {
             let imageExts: Set<String> = ["png", "jpg", "jpeg", "webp"]
             let audioExts: Set<String> = ["mp3", "ogg", "wav", "m4a", "aac"]
@@ -189,6 +196,31 @@ struct AssetGalleryView: View {
                         collected.append(AssetItem(id: "file:\(url.path)", name: url.lastPathComponent, kind: .audio, source: .loose(url)))
                     }
                     if collected.count >= 500 { break }
+                }
+            }
+
+            let manifestURL = dir.appendingPathComponent(SMBIndexManifest.manifestFileName)
+            if let smbSource,
+               let manifestText = try? String(contentsOf: manifestURL, encoding: .utf8) {
+                let manifest = SMBIndexManifest.parse(manifestText)
+                for entry in manifest.entries {
+                    if collected.count >= 500 { break }
+                    let ext = URL(fileURLWithPath: entry.logicalPath).pathExtension.lowercased()
+                    if imageExts.contains(ext) {
+                        collected.append(AssetItem(
+                            id: "smb:\(entry.logicalPath)",
+                            name: entry.logicalPath,
+                            kind: .image,
+                            source: .smb(entry: entry, source: smbSource, password: smbPass)
+                        ))
+                    } else if audioExts.contains(ext) {
+                        collected.append(AssetItem(
+                            id: "smb:\(entry.logicalPath)",
+                            name: entry.logicalPath,
+                            kind: .audio,
+                            source: .smb(entry: entry, source: smbSource, password: smbPass)
+                        ))
+                    }
                 }
             }
             return collected

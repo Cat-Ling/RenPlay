@@ -26,7 +26,7 @@ public enum RPAError: Error, LocalizedError, Sendable {
     }
 }
 
-public struct RPAIndexEntry: Sendable, Equatable {
+public struct RPAIndexEntry: Sendable, Equatable, Hashable {
     public let offset: UInt64
     public let length: UInt64
     public let prefix: Data
@@ -40,6 +40,7 @@ public struct RPAIndexEntry: Sendable, Equatable {
 
 public final class RPAArchive: @unchecked Sendable {
     public let fileURL: URL
+    public let fileSize: UInt64
     public let version: String
     public let entries: [String: [RPAIndexEntry]]
 
@@ -48,8 +49,27 @@ public final class RPAArchive: @unchecked Sendable {
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
 
-        guard let headerData = try handle.read(upToCount: 128),
-              let newlineIdx = headerData.firstIndex(of: 0x0A),
+        let endOffset = try handle.seekToEnd()
+        self.fileSize = endOffset
+
+        let parsed = try Self.parseIndex(fileSize: endOffset) { offset, count in
+            try handle.seek(toOffset: offset)
+            return try handle.read(upToCount: count) ?? Data()
+        }
+        self.version = parsed.version
+        self.entries = parsed.entries
+    }
+
+    public static func parseIndex(
+        fileSize: UInt64,
+        readSlice: (UInt64, Int) throws -> Data
+    ) throws -> (version: String, entries: [String: [RPAIndexEntry]]) {
+        guard fileSize > 0 else {
+            throw RPAError.invalidHeader
+        }
+        let headerCount = Int(min(UInt64(128), fileSize))
+        let headerData = try readSlice(0, headerCount)
+        guard let newlineIdx = headerData.firstIndex(of: 0x0A),
               let headerLine = String(data: headerData.prefix(upTo: newlineIdx), encoding: .utf8) else {
             throw RPAError.invalidHeader
         }
@@ -60,8 +80,6 @@ public final class RPAArchive: @unchecked Sendable {
         }
 
         let ver = String(parts[0])
-        self.version = ver
-
         let indexOffset: UInt64
         let key: UInt64
 
@@ -93,8 +111,15 @@ public final class RPAArchive: @unchecked Sendable {
             throw RPAError.unsupportedVersion(ver)
         }
 
-        try handle.seek(toOffset: indexOffset)
-        guard let compressedIndex = try handle.readToEnd(), !compressedIndex.isEmpty else {
+        guard indexOffset < fileSize else {
+            throw RPAError.corruptIndex
+        }
+        let indexByteCount = fileSize - indexOffset
+        guard indexByteCount > 0, indexByteCount <= 256 * 1024 * 1024 else {
+            throw RPAError.corruptIndex
+        }
+        let compressedIndex = try readSlice(indexOffset, Int(indexByteCount))
+        guard !compressedIndex.isEmpty else {
             throw RPAError.corruptIndex
         }
 
@@ -137,7 +162,30 @@ public final class RPAArchive: @unchecked Sendable {
                 map[name] = parsedSegments
             }
         }
-        self.entries = map
+        return (ver, map)
+    }
+
+    public static func assembleEntry(
+        segments: [RPAIndexEntry],
+        fileSize: UInt64,
+        readSlice: (UInt64, Int) throws -> Data
+    ) throws -> Data {
+        var output = Data()
+        for seg in segments {
+            output.append(seg.prefix)
+            let bodyLen = seg.length > UInt64(seg.prefix.count) ? seg.length - UInt64(seg.prefix.count) : 0
+            if bodyLen > 0 {
+                guard seg.offset <= fileSize, bodyLen <= fileSize - seg.offset else {
+                    throw RPAError.readOutOfBounds
+                }
+                let chunk = try readSlice(seg.offset, Int(bodyLen))
+                guard UInt64(chunk.count) == bodyLen else {
+                    throw RPAError.readOutOfBounds
+                }
+                output.append(chunk)
+            }
+        }
+        return output
     }
 
     public func listEntries() -> [String] {
@@ -152,24 +200,10 @@ public final class RPAArchive: @unchecked Sendable {
         defer { try? handle.close() }
 
         let fileEnd = try handle.seekToEnd()
-        var output = Data()
-
-        for seg in segments {
-            output.append(seg.prefix)
-            let bodyLen = seg.length > UInt64(seg.prefix.count) ? seg.length - UInt64(seg.prefix.count) : 0
-            if bodyLen > 0 {
-                guard seg.offset <= fileEnd, bodyLen <= fileEnd - seg.offset else {
-                    throw RPAError.readOutOfBounds
-                }
-                try handle.seek(toOffset: seg.offset)
-                guard let chunk = try handle.read(upToCount: Int(bodyLen)),
-                      UInt64(chunk.count) == bodyLen else {
-                    throw RPAError.readOutOfBounds
-                }
-                output.append(chunk)
-            }
+        return try Self.assembleEntry(segments: segments, fileSize: fileEnd) { offset, count in
+            try handle.seek(toOffset: offset)
+            return try handle.read(upToCount: count) ?? Data()
         }
-        return output
     }
 }
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "RenPlayBridge.h"
+#include "CSMB2.h"
 
 #ifdef __APPLE__
 
@@ -756,6 +757,7 @@ static void renplay_set_keyboard_visible(BOOL show, BOOL userInitiated) {
 + (void)reopenIfEngineTextInputActive;
 + (int)hasPendingKeyEvent;
 + (NSString *)consumeKeyEvent;
++ (unsigned long long)smbPreadSymbolAddress;
 @end
 
 @implementation RenPlayRuntimeBridge
@@ -805,6 +807,10 @@ static void renplay_set_keyboard_visible(BOOL show, BOOL userInitiated) {
     }
     pthread_mutex_unlock(&g_key_queue_lock);
     return first;
+}
+
++ (unsigned long long)smbPreadSymbolAddress {
+    return (unsigned long long)(uintptr_t)&renplay_smb_pread;
 }
 @end
 
@@ -1196,3 +1202,39 @@ const char *renplay_get_log_file_path(void) { return NULL; }
 int renplay_has_sdl_window(void) { return 0; }
 
 #endif
+
+int renplay_configure_smb_mount(
+    const char *host,
+    int port,
+    const char *share,
+    const char *baseRelPath,
+    const char *username,
+    const char *password,
+    const char *domain,
+    int isGuest,
+    char *errorBuf,
+    size_t errorBufSize
+) {
+    csmb_credentials_t creds = {
+        .host = host,
+        .port = port,
+        .username = username,
+        .password = password,
+        .domain = domain,
+        .is_guest = isGuest,
+    };
+    return csmb_mount_configure(&creds, share, baseRelPath, errorBuf, errorBufSize);
+}
+
+void renplay_clear_smb_mount(void) {
+    csmb_mount_clear();
+}
+
+int renplay_smb_is_active(void) {
+    return csmb_mount_is_active();
+}
+
+__attribute__((visibility("default"), used))
+ssize_t renplay_smb_pread(const char *gameRelPath, uint64_t offset, void *buf, size_t length) {
+    return csmb_mount_pread(gameRelPath, offset, buf, length);
+}

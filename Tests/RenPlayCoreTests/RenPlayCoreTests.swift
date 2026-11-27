@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 RenPlay Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import CSMB2
 import Foundation
 import Testing
 @testable import RenPlayCore
@@ -449,5 +450,130 @@ struct SaveAndLibraryTests {
         #expect(games.count == 2)
         #expect(games.contains(where: { $0.displayName == "DropArchive" && $0.detectedEngineVersion == "8.3.7" }))
         #expect(games.contains(where: { $0.displayName == "DropFolder" && $0.detectedEngineVersion == "8.5.3" }))
+    }
+}
+
+@Suite("SMB Streaming & Manifest Tests")
+struct SMBStreamingTests {
+    @Test("Parses RPA index using header and trailer byte ranges without reading body")
+    func remoteRPAByteRangeIndexSkipsBody() throws {
+        let largeBody = Data(repeating: 0x5A, count: 2 * 1024 * 1024)
+        let smallIcon = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let rpaData = try buildRPA30Archive(entries: [
+            ("movies/intro.webm", largeBody),
+            ("gui/main_menu.png", smallIcon),
+        ])
+
+        var reads: [(offset: UInt64, count: Int)] = []
+        let parsed = try RPAArchive.parseIndex(fileSize: UInt64(rpaData.count)) { off, cnt in
+            reads.append((off, cnt))
+            let start = Int(off)
+            let end = min(rpaData.count, start + cnt)
+            return rpaData.subdata(in: start..<end)
+        }
+
+        #expect(parsed.version == "RPA-3.0")
+        #expect(reads.count == 2)
+        #expect(reads[0].offset == 0)
+        #expect(reads[0].count == 128)
+        #expect(reads[1].offset > UInt64(largeBody.count))
+
+        let totalBytesRead = reads.reduce(0) { $0 + $1.count }
+        #expect(totalBytesRead < 4096)
+
+        let iconSegments = try #require(parsed.entries["gui/main_menu.png"])
+        let assembledIcon = try RPAArchive.assembleEntry(segments: iconSegments, fileSize: UInt64(rpaData.count)) { off, cnt in
+            let start = Int(off)
+            let end = min(rpaData.count, start + cnt)
+            return rpaData.subdata(in: start..<end)
+        }
+        #expect(assembledIcon == smallIcon)
+    }
+
+    @Test("Round-trips .renplay_smb_index.tsv manifest for loose and multi-segment RPA entries")
+    func smbIndexManifestRoundTrip() {
+        let manifest = SMBIndexManifest(entries: [
+            SMBIndexEntry(
+                logicalPath: "images/bg room.png",
+                backing: .loose(smbRelPath: "game/images/bg room.png", size: 987_654)
+            ),
+            SMBIndexEntry(
+                logicalPath: "audio/theme.ogg",
+                backing: .rpa(
+                    rpaRelPath: "game/audio.rpa",
+                    segments: [
+                        RPAIndexEntry(offset: 4096, length: 1_048_576, prefix: Data([0x4F, 0x67, 0x67, 0x53])),
+                        RPAIndexEntry(offset: 2_000_000, length: 512, prefix: Data()),
+                    ]
+                )
+            ),
+        ])
+
+        let serialized = manifest.serialize()
+        let reparsed = SMBIndexManifest.parse(serialized)
+        #expect(reparsed == manifest)
+        #expect(reparsed.entries[1].totalSize == 1_049_088)
+    }
+
+    @Test("Persists SMB server profiles, credentials, remote game source, and CSMB2 unmount state")
+    func smbServerPersistenceAndMountSmoke() throws {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = LibraryStore(rootDir: dir)
+        let fixedDate = Date(timeIntervalSince1970: 1_764_200_000)
+        let server = SMBServerProfile(
+            displayName: "Home NAS",
+            host: "192.168.1.40",
+            port: 445,
+            username: "renpy",
+            domain: "WORKGROUP",
+            isGuest: false,
+            createdAt: fixedDate
+        )
+        let saved = try store.upsertSMBServer(server, password: "s3cret-password")
+        #expect(saved.count == 1)
+        #expect(store.loadSMBServers() == [server])
+        #expect(store.smbPassword(for: server.id) == "s3cret-password")
+
+        let folderName = "StreamedVN"
+        let gameDir = store.gamesDir.appendingPathComponent(folderName, isDirectory: true)
+        try FileManager.default.createDirectory(at: gameDir.appendingPathComponent("game", isDirectory: true), withIntermediateDirectories: true)
+        let remoteSource = SMBGameSource(
+            serverID: server.id,
+            host: server.host,
+            port: server.port,
+            share: "Games",
+            remotePath: "VisualNovels/StreamedVN",
+            username: server.username,
+            domain: server.domain,
+            isGuest: false,
+            lastSyncedAt: fixedDate
+        )
+        let game = GameEntry(
+            displayName: "Streamed VN",
+            folderName: folderName,
+            detectedEngineVersion: "8.5.3",
+            remoteSource: remoteSource
+        )
+        try store.saveGames([game])
+
+        let synced = try store.syncWithDisk()
+        #expect(synced.count == 1)
+        #expect(synced[0].remoteSource == remoteSource)
+
+        _ = try store.deleteSMBServer(server)
+        #expect(store.loadSMBServers().isEmpty)
+        #expect(store.smbPassword(for: server.id).isEmpty)
+
+        csmb_mount_clear()
+        #expect(csmb_mount_is_active() == 0)
+        var buf = [UInt8](repeating: 0, count: 64)
+        let rc = buf.withUnsafeMutableBytes { raw in
+            "game/test.png".withCString { cPath in
+                csmb_mount_pread(cPath, 0, raw.baseAddress, 64)
+            }
+        }
+        #expect(rc < 0)
     }
 }

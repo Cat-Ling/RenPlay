@@ -16,3 +16,9 @@ path = [
 precedence = "closest"
 SPDX-FileCopyrightText = "2026 RenPlay Contributors"
 SPDX-License-Identifier = "GPL-3.0-or-later"
+
+[[annotations]]
+path = "Sources/CSMB2/upstream/**"
+precedence = "closest"
+SPDX-FileCopyrightText = "2014-2025 Ronnie Sahlberg"
+SPDX-License-Identifier = "LGPL-2.1-or-later"

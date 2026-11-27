@@ -20,6 +20,7 @@ struct LibraryView: View {
     @State private var activePickerMode: SideloadPickerMode?
     @State private var showWiFiUpload = false
     @State private var showURLDownload = false
+    @State private var showSMBBrowser = false
     @State private var selectedGame: GameEntry?
 
     private var filteredGames: [GameEntry] {
@@ -96,6 +97,9 @@ struct LibraryView: View {
             .sheet(isPresented: $showURLDownload) {
                 URLDownloadSheetView(appState: appState)
             }
+            .sheet(isPresented: $showSMBBrowser) {
+                SMBBrowserView(appState: appState)
+            }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
                     appState.scanDropzones(silentIfEmpty: true)
@@ -123,6 +127,9 @@ struct LibraryView: View {
             activePickerMode = .folder
         }
         Divider()
+        Button("Connect to SMB / LAN Share", systemImage: "externaldrive.connected.to.line.below") {
+            showSMBBrowser = true
+        }
         Button("Wi-Fi Browser Upload", systemImage: "wifi") {
             showWiFiUpload = true
         }
@@ -237,6 +244,17 @@ private struct GameCardView: View {
                     .frame(height: 115)
                     .frame(maxWidth: .infinity)
                     .clipShape(.rect(cornerRadius: 12))
+                    .overlay(alignment: .topLeading) {
+                        if game.remoteSource != nil {
+                            Label("LAN", systemImage: "network")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(.ultraThinMaterial)
+                                .clipShape(.rect(cornerRadius: 6))
+                                .padding(6)
+                        }
+                    }
 
                 if let ver = resolvedEngine ?? game.detectedEngineVersion {
                     Text("v\(ver)")

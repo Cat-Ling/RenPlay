@@ -25,6 +25,21 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "CSMB2",
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("config_shim"),
+                .headerSearchPath("upstream/include"),
+                .headerSearchPath("upstream/include/smb2"),
+                .headerSearchPath("upstream/lib"),
+                .define("HAVE_CONFIG_H", to: "1"),
+                .define("_FILE_OFFSET_BITS", to: "64"),
+                .define("_GNU_SOURCE"),
+                .define("_U_", to: "__attribute__((unused))"),
+                .unsafeFlags(["-w"]),
+            ]
+        ),
+        .target(
             name: "CZlib",
             dependencies: [
                 .product(name: "libzstd", package: "zstd"),
@@ -39,10 +54,14 @@ let package = Package(
         ),
         .target(
             name: "RenPlayCore",
-            dependencies: ["CZlib"]
+            dependencies: ["CZlib", "CSMB2"],
+            linkerSettings: [
+                .linkedFramework("Security", .when(platforms: [.iOS])),
+            ]
         ),
         .target(
             name: "CRenPlayBridge",
+            dependencies: ["CSMB2"],
             publicHeadersPath: "include",
             cSettings: [
                 .unsafeFlags(["-fobjc-arc"], .when(platforms: [.iOS])),
@@ -68,7 +87,7 @@ let package = Package(
         ),
         .testTarget(
             name: "RenPlayCoreTests",
-            dependencies: ["RenPlayCore"]
+            dependencies: ["RenPlayCore", "CSMB2"]
         ),
     ]
 )

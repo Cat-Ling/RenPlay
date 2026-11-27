@@ -15,6 +15,7 @@ public final class AppState {
     public let launcher: EngineLauncher
 
     public var games: [GameEntry] = []
+    public var smbServers: [SMBServerProfile] = []
     public var appSettings: AppSettings
     public var engines: [EngineInfo] = []
     public var isImporting = false
@@ -35,6 +36,7 @@ public final class AppState {
         self.appSettings = store.loadSettings()
         self.launcher = EngineLauncher(libraryStore: store, saveManager: SaveManager())
         self.engines = Self.loadBundledManifest().engines
+        self.smbServers = store.loadSMBServers()
         refreshLibrary()
     }
 
@@ -80,6 +82,91 @@ public final class AppState {
             games.removeAll { $0.id == game.id }
         } catch {
             activeError = error.localizedDescription
+        }
+    }
+
+    public func saveSMBServer(_ server: SMBServerProfile, password: String) {
+        do {
+            smbServers = try libraryStore.upsertSMBServer(server, password: password)
+        } catch {
+            activeError = error.localizedDescription
+        }
+    }
+
+    public func deleteSMBServer(_ server: SMBServerProfile) {
+        do {
+            smbServers = try libraryStore.deleteSMBServer(server)
+        } catch {
+            activeError = error.localizedDescription
+        }
+    }
+
+    public func importRemoteSMBGame(
+        server: SMBServerProfile,
+        password: String,
+        share: String,
+        remotePath: String,
+        preferredName: String? = nil
+    ) async -> Bool {
+        isImporting = true
+        importProgress = 0.02
+        importStatus = "Indexing SMB game..."
+        let store = libraryStore
+
+        do {
+            let entry = try await Task.detached(priority: .userInitiated) {
+                try store.importRemoteSMBGame(
+                    server: server,
+                    password: password,
+                    share: share,
+                    remotePath: remotePath,
+                    preferredName: preferredName
+                ) { frac, msg in
+                    Task { @MainActor in
+                        self.importProgress = frac
+                        self.importStatus = msg
+                    }
+                }
+            }.value
+            games.append(entry)
+            isImporting = false
+            importProgress = 0
+            importStatus = ""
+            return true
+        } catch {
+            isImporting = false
+            importProgress = 0
+            importStatus = ""
+            activeError = "SMB import failed: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    public func refreshRemoteSMBGame(_ game: GameEntry) async {
+        isImporting = true
+        importProgress = 0.05
+        importStatus = "Syncing remote scripts..."
+        let store = libraryStore
+        do {
+            let updated = try await Task.detached(priority: .userInitiated) {
+                try store.refreshRemoteSMBGame(game) { frac, msg in
+                    Task { @MainActor in
+                        self.importProgress = frac
+                        self.importStatus = msg
+                    }
+                }
+            }.value
+            if let idx = games.firstIndex(where: { $0.id == updated.id }) {
+                games[idx] = updated
+            }
+            isImporting = false
+            importProgress = 0
+            importStatus = ""
+        } catch {
+            isImporting = false
+            importProgress = 0
+            importStatus = ""
+            activeError = "Failed to refresh SMB game: \(error.localizedDescription)"
         }
     }
 

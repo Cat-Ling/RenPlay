@@ -13,6 +13,8 @@ public final class LibraryStore: @unchecked Sendable {
     public let exportsDir: URL
     private let libraryFileURL: URL
     private let settingsFileURL: URL
+    private let smbServersFileURL: URL
+    public let credentialStore: SMBCredentialStore
 
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
@@ -37,6 +39,15 @@ public final class LibraryStore: @unchecked Sendable {
         self.exportsDir = rootDir.appendingPathComponent("Exports", isDirectory: true)
         self.libraryFileURL = rootDir.appendingPathComponent("library.json")
         self.settingsFileURL = rootDir.appendingPathComponent("settings.json")
+        self.smbServersFileURL = rootDir.appendingPathComponent("smb_servers.json")
+        let credDir: URL
+        #if os(iOS)
+        credDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("RenPlay", isDirectory: true) ?? rootDir
+        #else
+        credDir = rootDir
+        #endif
+        self.credentialStore = SMBCredentialStore(storageDir: credDir)
         ensureDirectories()
     }
 
@@ -110,6 +121,151 @@ public final class LibraryStore: @unchecked Sendable {
         ensureDirectories()
         let data = try encoder.encode(games)
         try data.write(to: libraryFileURL, options: .atomic)
+    }
+
+    public func loadSMBServers() -> [SMBServerProfile] {
+        guard let data = try? Data(contentsOf: smbServersFileURL),
+              let decoded = try? decoder.decode([SMBServerProfile].self, from: data) else {
+            return []
+        }
+        return decoded
+    }
+
+    public func saveSMBServers(_ servers: [SMBServerProfile]) throws {
+        ensureDirectories()
+        let data = try encoder.encode(servers)
+        try data.write(to: smbServersFileURL, options: .atomic)
+    }
+
+    public func upsertSMBServer(_ server: SMBServerProfile, password: String) throws -> [SMBServerProfile] {
+        var servers = loadSMBServers()
+        if let idx = servers.firstIndex(where: { $0.id == server.id }) {
+            servers[idx] = server
+        } else {
+            servers.append(server)
+        }
+        try saveSMBServers(servers)
+        credentialStore.setPassword(password, forServerID: server.id)
+        return servers
+    }
+
+    public func deleteSMBServer(_ server: SMBServerProfile) throws -> [SMBServerProfile] {
+        var servers = loadSMBServers()
+        servers.removeAll { $0.id == server.id }
+        try saveSMBServers(servers)
+        credentialStore.deletePassword(forServerID: server.id)
+        return servers
+    }
+
+    public func smbPassword(for serverID: UUID) -> String {
+        credentialStore.password(forServerID: serverID)
+    }
+
+    public func importRemoteSMBGame(
+        server: SMBServerProfile,
+        password: String,
+        share: String,
+        remotePath: String,
+        preferredName: String? = nil,
+        progress: (@Sendable (Double, String) -> Void)? = nil
+    ) throws -> GameEntry {
+        ensureDirectories()
+        let cleanRemote = SMBClient.normalizeRelativePath(remotePath)
+        let fallbackName = cleanRemote.split(separator: "/").last.map(String.init) ?? share
+        let rawTitle = preferredName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? preferredName!.trimmingCharacters(in: .whitespacesAndNewlines)
+            : fallbackName
+        let folderName = uniqueFolderName(base: sanitizeFolderName(rawTitle))
+        let localDir = gamesDir.appendingPathComponent(folderName, isDirectory: true)
+
+        do {
+            let normalizedRoot = try SMBClient.prepareStreamedGame(
+                server: server,
+                password: password,
+                share: share,
+                remoteGamePath: cleanRemote,
+                localGameDir: localDir,
+                progress: progress
+            )
+            let detected = RenPyVersionDetector.detectVersion(in: localDir)
+            let cover = extractCoverIfNeeded(in: localDir)
+            let source = SMBGameSource(
+                serverID: server.id,
+                host: server.host,
+                port: server.port,
+                share: share,
+                remotePath: normalizedRoot,
+                username: server.username,
+                domain: server.domain,
+                isGuest: server.isGuest,
+                lastSyncedAt: Date()
+            )
+            let entry = GameEntry(
+                displayName: rawTitle,
+                folderName: folderName,
+                detectedEngineVersion: detected?.version?.description ?? detected?.majorHint.map { "\($0).x" },
+                coverRelativePath: cover,
+                remoteSource: source
+            )
+            var games = loadGames()
+            games.append(entry)
+            try saveGames(games)
+            return entry
+        } catch {
+            try? FileManager.default.removeItem(at: localDir)
+            throw error
+        }
+    }
+
+    public func refreshRemoteSMBGame(
+        _ game: GameEntry,
+        progress: (@Sendable (Double, String) -> Void)? = nil
+    ) throws -> GameEntry {
+        guard let source = game.remoteSource else {
+            throw SMBError.invalidConfiguration("Selected game is not configured for SMB streaming.")
+        }
+        let server = SMBServerProfile(
+            id: source.serverID,
+            displayName: source.host,
+            host: source.host,
+            port: source.port,
+            username: source.username,
+            domain: source.domain,
+            isGuest: source.isGuest
+        )
+        let password = credentialStore.password(forServerID: source.serverID)
+        let localDir = gameDirectory(for: game)
+        let normalizedRoot = try SMBClient.prepareStreamedGame(
+            server: server,
+            password: password,
+            share: source.share,
+            remoteGamePath: source.remotePath,
+            localGameDir: localDir,
+            progress: progress
+        )
+        let detected = RenPyVersionDetector.detectVersion(in: localDir)
+        let cover = extractCoverIfNeeded(in: localDir)
+
+        var updated = game
+        updated.detectedEngineVersion = detected?.version?.description ?? detected?.majorHint.map { "\($0).x" }
+        updated.coverRelativePath = cover
+        updated.remoteSource = SMBGameSource(
+            serverID: source.serverID,
+            host: source.host,
+            port: source.port,
+            share: source.share,
+            remotePath: normalizedRoot,
+            username: source.username,
+            domain: source.domain,
+            isGuest: source.isGuest,
+            lastSyncedAt: Date()
+        )
+        var games = loadGames()
+        if let idx = games.firstIndex(where: { $0.id == game.id }) {
+            games[idx] = updated
+            try saveGames(games)
+        }
+        return updated
     }
 
     // Reconcile library.json against Games/ so folders dropped via Files app are auto-discovered.

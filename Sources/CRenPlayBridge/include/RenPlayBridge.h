@@ -5,6 +5,8 @@
 #define RENPLAY_BRIDGE_H
 
 #include <stddef.h>
+#include <stdint.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -76,6 +78,29 @@ const char *renplay_get_log_file_path(void);
 
 // Returns 1 if an active SDL_uikitwindow is currently visible in the foreground scene, 0 otherwise.
 int renplay_has_sdl_window(void);
+
+// Configures a persistent SMB2/SMB3 share mount for zero-download in-game streaming.
+int renplay_configure_smb_mount(
+    const char *host,
+    int port,
+    const char *share,
+    const char *baseRelPath,
+    const char *username,
+    const char *password,
+    const char *domain,
+    int isGuest,
+    char *errorBuf,
+    size_t errorBufSize
+);
+
+// Tears down the active SMB mount and releases cached handles and blocks.
+void renplay_clear_smb_mount(void);
+
+// Returns 1 if an SMB game mount is active, 0 otherwise.
+int renplay_smb_is_active(void);
+
+// Thread-safe byte-range read from the active SMB game mount for Ren'Py's Python ctypes loader.
+ssize_t renplay_smb_pread(const char *gameRelPath, uint64_t offset, void *buf, size_t length);
 
 #ifdef __cplusplus
 }

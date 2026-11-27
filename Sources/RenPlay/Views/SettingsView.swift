@@ -9,6 +9,7 @@ struct SettingsView: View {
     @Bindable var appState: AppState
     @State private var cacheSizeBytes: Int64 = 0
     @State private var showLicenseSheet = false
+    @State private var showSMBBrowser = false
     @State private var copiedDocsPath = false
 
     var body: some View {
@@ -93,6 +94,9 @@ struct SettingsView: View {
                         UIPasteboard.general.string = appState.documentsDir.path
                         copiedDocsPath = true
                     }
+                    Button("Connect to SMB / LAN Share") {
+                        showSMBBrowser = true
+                    }
                     Button("Scan App Folder & Inbox") {
                         appState.scanDropzones(silentIfEmpty: false)
                     }
@@ -118,6 +122,9 @@ struct SettingsView: View {
             .onChange(of: appState.appSettings) {
                 appState.saveAppSettings()
             }
+            .sheet(isPresented: $showSMBBrowser) {
+                SMBBrowserView(appState: appState)
+            }
             .sheet(isPresented: $showLicenseSheet) {
                 NavigationStack {
                     ScrollView {
@@ -127,6 +134,8 @@ struct SettingsView: View {
                             Text("Copyright (C) 2026 RenPlay Contributors")
                             Text("This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.")
                             Text("This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.")
+                            Text("Includes libsmb2 (LGPL-2.1-or-later) for SMB2/SMB3 LAN share access and Zstandard (BSD-3-Clause) for archive decompression.")
+                                .font(.footnote)
                             Text("RenPlay is an independent open-source project and is not affiliated with or endorsed by Ren'Py.")
                                 .foregroundStyle(.secondary)
                         }
