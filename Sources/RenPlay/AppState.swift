@@ -76,7 +76,7 @@ public final class AppState {
         }
     }
 
-    public func deleteGame(_ game: GameEntry, deleteSaves: Bool = true) {
+    public func deleteGame(_ game: GameEntry, deleteSaves: Bool) {
         do {
             try libraryStore.deleteGame(game, deleteSaves: deleteSaves)
             games.removeAll { $0.id == game.id }
@@ -321,8 +321,8 @@ public final class AppState {
         case .auto:
             break
         }
-        let gameDir = libraryStore.gameDirectory(for: game)
-        let detected = RenPyVersionDetector.detectVersion(in: gameDir)
+        // Detection runs at import/sync time; re-scanning the game folder here would run on every grid render.
+        let detected = game.detectedEngineVersion.flatMap(DetectedVersion.init(storedDescription:))
         return EngineSelector.selectEngine(
             detected: detected,
             available: engines,

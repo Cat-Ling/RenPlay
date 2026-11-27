@@ -10,6 +10,9 @@ public struct DetectedVersion: Sendable, Equatable {
         case scriptVersionTxt
         case runtimeLibDir
         case rpycHeader
+        case cacheFileName
+        case remoteListing
+        case stored
     }
 
     public let version: SemVer?
@@ -21,9 +24,28 @@ public struct DetectedVersion: Sendable, Equatable {
         self.majorHint = majorHint ?? version?.major
         self.source = source
     }
+
+    // Parses the label persisted in GameEntry.detectedEngineVersion ("8.3.7" or "8.x").
+    public init?(storedDescription raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasSuffix(".x"), let major = Int(trimmed.dropLast(2)) {
+            self.init(version: nil, majorHint: major, source: .stored)
+            return
+        }
+        guard let ver = SemVer(parsing: trimmed) else { return nil }
+        self.init(version: ver, source: .stored)
+    }
+
+    public var libraryLabel: String? {
+        version?.description ?? majorHint.map { "\($0).x" }
+    }
 }
 
 public enum RenPyVersionDetector {
+    // Written by SMB sync from remote lib/ and game/cache listings, which are never downloaded.
+    public static let remoteHintFileName = ".renplay_engine_hint"
+    private static let maxRpycProbes = 40
+
     public static func detectVersion(in gameRoot: URL) -> DetectedVersion? {
         let fm = FileManager.default
 
@@ -52,16 +74,24 @@ public enum RenPyVersionDetector {
         }
 
         let libDir = gameRoot.appendingPathComponent("lib")
-        if let entries = try? fm.contentsOfDirectory(atPath: libDir.path) {
-            if entries.contains(where: { $0.hasPrefix("py3-") || $0.hasPrefix("python3") }) {
-                return DetectedVersion(version: nil, majorHint: 8, source: .runtimeLibDir)
-            }
-            if entries.contains(where: { $0.hasPrefix("py2-") || $0.hasPrefix("python2") || $0.hasPrefix("linux-") || $0.hasPrefix("windows-") || $0.hasPrefix("mac-") }) {
-                return DetectedVersion(version: nil, majorHint: 7, source: .runtimeLibDir)
-            }
+        if let entries = try? fm.contentsOfDirectory(atPath: libDir.path),
+           let major = majorHint(fromRuntimeEntries: entries) {
+            return DetectedVersion(version: nil, majorHint: major, source: .runtimeLibDir)
         }
 
         let gameSubdir = gameRoot.appendingPathComponent("game")
+        let cacheDir = gameSubdir.appendingPathComponent("cache")
+        if let entries = try? fm.contentsOfDirectory(atPath: cacheDir.path),
+           let major = majorHint(fromCacheFileNames: entries) {
+            return DetectedVersion(version: nil, majorHint: major, source: .cacheFileName)
+        }
+
+        let hintURL = gameRoot.appendingPathComponent(remoteHintFileName)
+        if let text = try? String(contentsOf: hintURL, encoding: .utf8),
+           let major = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return DetectedVersion(version: nil, majorHint: major, source: .remoteListing)
+        }
+
         let scanDir = fm.fileExists(atPath: gameSubdir.path) ? gameSubdir : gameRoot
         if let rpycVer = inferMajorFromRpycDirectory(scanDir) {
             return rpycVer
@@ -70,19 +100,49 @@ public enum RenPyVersionDetector {
         return nil
     }
 
+    static func majorHint(fromRuntimeEntries names: [String]) -> Int? {
+        if names.contains(where: { $0.hasPrefix("py3-") || $0.hasPrefix("python3") }) {
+            return 8
+        }
+        if names.contains(where: { $0.hasPrefix("py2-") || $0.hasPrefix("python2") || $0.hasPrefix("linux-") || $0.hasPrefix("windows-") || $0.hasPrefix("mac-") }) {
+            return 7
+        }
+        return nil
+    }
+
+    // Ren'Py names its bytecode cache after the embedded Python (bytecode-39/311/312 on 8.x, bytecode-27 or unversioned on 7.x).
+    static func majorHint(fromCacheFileNames names: [String]) -> Int? {
+        let lowered = names.map { $0.lowercased() }
+        if lowered.contains(where: { $0 == "py3analysis.rpyb" || ($0.hasPrefix("bytecode-3") && $0.hasSuffix(".rpyb")) }) {
+            return 8
+        }
+        if lowered.contains(where: { $0 == "pyanalysis.rpyb" || $0 == "bytecode.rpyb" || ($0.hasPrefix("bytecode-2") && $0.hasSuffix(".rpyb")) }) {
+            return 7
+        }
+        return nil
+    }
+
     static func parseVersionTuple(in text: String) -> SemVer? {
-        let pattern = #"version_tuple\s*=\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
-              match.numberOfRanges >= 4 else {
-            return nil
+        // Ren'Py <= 8.1 writes version_tuple; 8.2+ vc_version.py only carries version = '8.x.y.build'.
+        let patterns = [
+            #"version_tuple\s*=\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)"#,
+            #"(?m)^\s*version\s*=\s*u?['"](\d+)\.(\d+)\.(\d+)"#,
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                  match.numberOfRanges >= 4 else {
+                continue
+            }
+            func intAt(_ idx: Int) -> Int? {
+                guard let r = Range(match.range(at: idx), in: text) else { return nil }
+                return Int(text[r])
+            }
+            if let maj = intAt(1), let min = intAt(2), let pat = intAt(3) {
+                return SemVer(major: maj, minor: min, patch: pat)
+            }
         }
-        func intAt(_ idx: Int) -> Int? {
-            guard let r = Range(match.range(at: idx), in: text) else { return nil }
-            return Int(text[r])
-        }
-        guard let maj = intAt(1), let min = intAt(2), let pat = intAt(3) else { return nil }
-        return SemVer(major: maj, minor: min, patch: pat)
+        return nil
     }
 
     static func parseScriptVersion(in text: String) -> SemVer? {
@@ -109,32 +169,48 @@ public enum RenPyVersionDetector {
     }
 
     private static func inferMajorFromRpycDirectory(_ dir: URL) -> DetectedVersion? {
-        guard let items = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+        guard let enumerator = FileManager.default.enumerator(
+            at: dir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
             return nil
         }
-        for item in items where item.pathExtension.lowercased() == "rpyc" {
+        var probed = 0
+        while let item = enumerator.nextObject() as? URL {
+            let ext = item.pathExtension.lowercased()
+            guard ext == "rpyc" || ext == "rpymc" else { continue }
+            probed += 1
+            if probed > maxRpycProbes { break }
             guard let data = try? Data(contentsOf: item, options: .mappedIfSafe),
-                  data.count >= 22 else { continue }
-            if data.starts(with: Data("RENPY RPC2".utf8)) {
-                // Slot 1 starts at byte 10: uint32 offset, uint32 length
-                let slotOffset = Int(data.readUInt32LE(at: 10))
-                let slotLength = Int(data.readUInt32LE(at: 14))
-                if slotOffset >= 22, slotLength > 4, slotOffset + slotLength <= data.count {
-                    let compressed = data.subdata(in: slotOffset..<(slotOffset + slotLength))
-                    if let inflated = try? ZlibCodec.inflate(compressed, rawDeflate: false) {
-                        // Pickle protocol >= 4 (0x80 0x04 / 0x05) is Python 3 (Ren'Py 8.x); protocol 2 (0x80 0x02) is typically Ren'Py 7.x
-                        if inflated.count >= 2 && inflated[0] == 0x80 {
-                            let proto = inflated[1]
-                            if proto >= 4 {
-                                return DetectedVersion(version: nil, majorHint: 8, source: .rpycHeader)
-                            }
-                            if proto <= 2 {
-                                return DetectedVersion(version: nil, majorHint: 7, source: .rpycHeader)
-                            }
-                        }
-                    }
-                }
+                  let compressed = rpycSlotOnePayload(data),
+                  let inflated = try? ZlibCodec.inflate(compressed, rawDeflate: false),
+                  inflated.count >= 2, inflated[0] == 0x80 else { continue }
+            // Pickle protocol 3+ only exists on Python 3 (Ren'Py 8.x); Python 2 tops out at protocol 2 (Ren'Py 7.x).
+            let major = inflated[1] >= 3 ? 8 : 7
+            return DetectedVersion(version: nil, majorHint: major, source: .rpycHeader)
+        }
+        return nil
+    }
+
+    // RPC2 layout: "RENPY RPC2" then (slot, start, length) uint32 triples terminated by slot 0.
+    // Files without the header are legacy single-stream zlib pickles.
+    private static func rpycSlotOnePayload(_ data: Data) -> Data? {
+        let magic = Data("RENPY RPC2".utf8)
+        guard data.starts(with: magic) else {
+            return data.count > 2 ? data : nil
+        }
+        var pos = magic.count
+        while pos + 12 <= data.count {
+            let slot = data.readUInt32LE(at: pos)
+            let start = Int(data.readUInt32LE(at: pos + 4))
+            let length = Int(data.readUInt32LE(at: pos + 8))
+            if slot == 0 { return nil }
+            if slot == 1 {
+                guard length > 0, start >= pos + 12, start + length <= data.count else { return nil }
+                return data.subdata(in: start..<(start + length))
             }
+            pos += 12
         }
         return nil
     }

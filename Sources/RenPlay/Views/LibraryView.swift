@@ -22,6 +22,7 @@ struct LibraryView: View {
     @State private var showURLDownload = false
     @State private var showSMBBrowser = false
     @State private var selectedGame: GameEntry?
+    @State private var gamePendingDelete: GameEntry?
 
     private var filteredGames: [GameEntry] {
         let base = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -178,14 +179,19 @@ struct LibraryView: View {
                         Button("Play", systemImage: "play.fill") {
                             appState.launch(game: game)
                         }
-                        Button("Delete", systemImage: "trash", role: .destructive) {
-                            appState.deleteGame(game)
+                        Button(
+                            game.remoteSource != nil ? "Remove from Library" : "Delete",
+                            systemImage: "trash",
+                            role: .destructive
+                        ) {
+                            gamePendingDelete = game
                         }
                     }
                 }
             }
             .padding()
         }
+        .gameDeletionDialog(pending: $gamePendingDelete, appState: appState)
         .refreshable {
             appState.refreshLibrary()
         }
@@ -239,52 +245,63 @@ private struct GameCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ZStack(alignment: .bottomTrailing) {
-                coverImage
-                    .frame(height: 115)
-                    .frame(maxWidth: .infinity)
-                    .clipShape(.rect(cornerRadius: 12))
-                    .overlay(alignment: .topLeading) {
-                        if game.remoteSource != nil {
-                            Label("LAN", systemImage: "network")
-                                .font(.caption2.weight(.semibold))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 3)
-                                .background(.ultraThinMaterial)
-                                .clipShape(.rect(cornerRadius: 6))
-                                .padding(6)
-                        }
-                    }
-
-                if let ver = resolvedEngine ?? game.detectedEngineVersion {
-                    Text("v\(ver)")
-                        .font(.caption2.monospacedDigit().weight(.semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(.ultraThinMaterial)
-                        .clipShape(.rect(cornerRadius: 6))
-                        .padding(6)
+            // Cover sits in an overlay so wide aspect ratios cannot widen the grid column.
+            Color.clear
+                .frame(maxWidth: .infinity)
+                .frame(height: 118)
+                .overlay {
+                    coverImage
                 }
-            }
+                .clipped()
+                .overlay(alignment: .topLeading) {
+                    if game.remoteSource != nil {
+                        Label("LAN", systemImage: "network")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(.ultraThinMaterial)
+                            .clipShape(.rect(cornerRadius: 6))
+                            .padding(6)
+                    }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if let ver = resolvedEngine ?? game.detectedEngineVersion {
+                        Text("v\(ver)")
+                            .font(.caption2.monospacedDigit().weight(.semibold))
+                            .lineLimit(1)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(.ultraThinMaterial)
+                            .clipShape(.rect(cornerRadius: 6))
+                            .padding(6)
+                    }
+                }
+                .clipShape(.rect(cornerRadius: 12))
 
             Text(game.displayName)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.primary)
-                .lineLimit(2)
+                .lineLimit(2, reservesSpace: true)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
 
             if let last = game.lastPlayedAt {
                 Text(last, style: .relative)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             } else {
                 Text("Never played")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
         .padding(10)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(.rect(cornerRadius: 14))
+        .contentShape(.rect(cornerRadius: 14))
     }
 
     @ViewBuilder
@@ -304,6 +321,63 @@ private struct GameCardView: View {
                 Image(systemName: "books.vertical.fill")
                     .font(.title)
                     .foregroundStyle(.white.opacity(0.85))
+            }
+        }
+    }
+}
+
+extension View {
+    func gameDeletionDialog(
+        pending: Binding<GameEntry?>,
+        appState: AppState,
+        onDeleted: @escaping () -> Void = {}
+    ) -> some View {
+        let isPresented = Binding<Bool>(
+            get: { pending.wrappedValue != nil },
+            set: { if !$0 { pending.wrappedValue = nil } }
+        )
+        let title = if let game = pending.wrappedValue {
+            game.remoteSource != nil ? "Remove \(game.displayName) from Library?" : "Delete \(game.displayName)?"
+        } else {
+            ""
+        }
+        return confirmationDialog(
+            title,
+            isPresented: isPresented,
+            titleVisibility: .visible,
+            presenting: pending.wrappedValue
+        ) { game in
+            if game.remoteSource != nil {
+                Button("Remove and Delete Saves", role: .destructive) {
+                    appState.deleteGame(game, deleteSaves: true)
+                    pending.wrappedValue = nil
+                    onDeleted()
+                }
+                Button("Remove Only (Keep Saves)") {
+                    appState.deleteGame(game, deleteSaves: false)
+                    pending.wrappedValue = nil
+                    onDeleted()
+                }
+            } else {
+                Button("Delete Game and Saves", role: .destructive) {
+                    appState.deleteGame(game, deleteSaves: true)
+                    pending.wrappedValue = nil
+                    onDeleted()
+                }
+                Button("Delete Game Only (Keep Saves)") {
+                    appState.deleteGame(game, deleteSaves: false)
+                    pending.wrappedValue = nil
+                    onDeleted()
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pending.wrappedValue = nil
+            }
+        } message: { game in
+            if game.remoteSource != nil {
+                Text("Files on your network share are not modified. Kept saves remain in the Saves tab and reconnect if you add this game again.")
+            } else {
+                Text("Kept saves remain in the Saves tab and reconnect if you import this game again.")
             }
         }
     }

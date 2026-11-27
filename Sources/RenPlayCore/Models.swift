@@ -196,6 +196,8 @@ public struct GameEntry: Codable, Sendable, Identifiable, Hashable {
     public var playTimeSeconds: TimeInterval
     public var settings: GameSettings
     public var remoteSource: SMBGameSource?
+    // Name of the Saves/ and Backups/ subfolder; nil keeps the legacy id-based folder.
+    public var saveIdentifier: String?
 
     public init(
         id: UUID = UUID(),
@@ -207,7 +209,8 @@ public struct GameEntry: Codable, Sendable, Identifiable, Hashable {
         lastPlayedAt: Date? = nil,
         playTimeSeconds: TimeInterval = 0,
         settings: GameSettings = GameSettings(),
-        remoteSource: SMBGameSource? = nil
+        remoteSource: SMBGameSource? = nil,
+        saveIdentifier: String? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -219,6 +222,22 @@ public struct GameEntry: Codable, Sendable, Identifiable, Hashable {
         self.playTimeSeconds = playTimeSeconds
         self.settings = settings
         self.remoteSource = remoteSource
+        self.saveIdentifier = saveIdentifier
+    }
+}
+
+// Saves kept after their game was removed from the library.
+public struct OrphanedSaveGroup: Identifiable, Sendable, Hashable {
+    public let id: String
+    public let displayName: String
+    public let slotCount: Int
+    public let modifiedAt: Date
+
+    public init(id: String, displayName: String, slotCount: Int, modifiedAt: Date) {
+        self.id = id
+        self.displayName = displayName
+        self.slotCount = slotCount
+        self.modifiedAt = modifiedAt
     }
 }
 

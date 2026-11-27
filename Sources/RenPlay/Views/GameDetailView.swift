@@ -10,7 +10,7 @@ struct GameDetailView: View {
     let gameID: UUID
     @Environment(\.dismiss) private var dismiss
 
-    @State private var showDeleteConfirm = false
+    @State private var pendingDelete: GameEntry?
     @State private var editedName = ""
     @State private var showRenameAlert = false
 
@@ -138,8 +138,8 @@ struct GameDetailView: View {
                     editedName = game.displayName
                     showRenameAlert = true
                 }
-                Button("Delete Game", role: .destructive) {
-                    showDeleteConfirm = true
+                Button(game.remoteSource != nil ? "Remove from Library" : "Delete Game", role: .destructive) {
+                    pendingDelete = game
                 }
             }
         }
@@ -157,20 +157,8 @@ struct GameDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
-        .confirmationDialog(
-            "Delete \(game.displayName)?",
-            isPresented: $showDeleteConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Delete Game and Saves", role: .destructive) {
-                appState.deleteGame(game, deleteSaves: true)
-                dismiss()
-            }
-            Button("Delete Game Only (Keep Saves)", role: .destructive) {
-                appState.deleteGame(game, deleteSaves: false)
-                dismiss()
-            }
-            Button("Cancel", role: .cancel) {}
+        .gameDeletionDialog(pending: $pendingDelete, appState: appState) {
+            dismiss()
         }
     }
 

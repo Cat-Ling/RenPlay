@@ -8,43 +8,89 @@ import UniformTypeIdentifiers
 
 struct GlobalSavesView: View {
     @Bindable var appState: AppState
+    @State private var orphanedGroups: [OrphanedSaveGroup] = []
 
     var body: some View {
         NavigationStack {
             List {
-                if appState.games.isEmpty {
+                if appState.games.isEmpty && orphanedGroups.isEmpty {
                     ContentUnavailableView(
                         "No Games",
                         systemImage: "externaldrive",
                         description: Text("Import a visual novel to manage its save slots and backups.")
                     )
                 } else {
-                    ForEach(appState.games) { game in
-                        NavigationLink {
-                            GameSaveManagerView(appState: appState, game: game)
-                        } label: {
-                            let count = appState.saveManager.listSaves(
-                                in: appState.libraryStore.saveDirectory(for: game)
-                            ).count
-                            HStack {
-                                Text(game.displayName)
-                                Spacer()
-                                Text("\(count) files")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                    if !appState.games.isEmpty {
+                        Section("Library") {
+                            ForEach(appState.games) { game in
+                                NavigationLink {
+                                    GameSaveManagerView(appState: appState, game: game)
+                                } label: {
+                                    let count = appState.saveManager.listSaves(
+                                        in: appState.libraryStore.saveDirectory(for: game)
+                                    ).count
+                                    HStack {
+                                        Text(game.displayName)
+                                        Spacer()
+                                        Text("\(count) files")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
                             }
+                        }
+                    }
+
+                    if !orphanedGroups.isEmpty {
+                        Section {
+                            ForEach(orphanedGroups) { orphan in
+                                NavigationLink {
+                                    GameSaveManagerView(appState: appState, orphan: orphan)
+                                } label: {
+                                    HStack {
+                                        Text(orphan.displayName)
+                                        Spacer()
+                                        Text("\(orphan.slotCount) files")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .swipeActions {
+                                    Button("Delete", role: .destructive) {
+                                        do {
+                                            try appState.libraryStore.deleteOrphanedSaveGroup(id: orphan.id)
+                                            reloadOrphans()
+                                        } catch {
+                                            appState.activeError = error.localizedDescription
+                                        }
+                                    }
+                                }
+                            }
+                        } header: {
+                            Text("Kept Saves (Removed Games)")
+                        } footer: {
+                            Text("Kept saves reconnect automatically when you add the same game again.")
                         }
                     }
                 }
             }
             .navigationTitle("Save Manager")
+            .onAppear { reloadOrphans() }
+            .onChange(of: appState.games) { reloadOrphans() }
         }
+    }
+
+    private func reloadOrphans() {
+        orphanedGroups = appState.libraryStore.listOrphanedSaveGroups()
     }
 }
 
 struct GameSaveManagerView: View {
     let appState: AppState
-    let game: GameEntry
+    let title: String
+    let saveDir: URL
+    let backupDir: URL
+    let exportName: String
 
     @State private var slots: [SaveSlot] = []
     @State private var backups: [BackupEntry] = []
@@ -52,8 +98,23 @@ struct GameSaveManagerView: View {
     @State private var exportedZipURL: URL?
     @State private var statusBanner: String?
 
-    private var saveDir: URL { appState.libraryStore.saveDirectory(for: game) }
-    private var backupDir: URL { appState.libraryStore.backupDirectory(for: game) }
+    init(appState: AppState, game: GameEntry) {
+        self.appState = appState
+        self.title = game.displayName
+        self.saveDir = appState.libraryStore.saveDirectory(for: game)
+        self.backupDir = appState.libraryStore.backupDirectory(for: game)
+        self.exportName = game.folderName
+    }
+
+    init(appState: AppState, orphan: OrphanedSaveGroup) {
+        self.appState = appState
+        self.title = orphan.displayName
+        self.saveDir = appState.libraryStore.saveDirectory(forIdentifier: orphan.id)
+        self.backupDir = appState.libraryStore.backupDirectory(forIdentifier: orphan.id)
+        let invalid = CharacterSet(charactersIn: "/:\\?%*|\"<>")
+        let cleaned = orphan.displayName.components(separatedBy: invalid).joined(separator: "_")
+        self.exportName = cleaned.isEmpty ? orphan.id : cleaned
+    }
 
     var body: some View {
         List {
@@ -136,7 +197,7 @@ struct GameSaveManagerView: View {
                     Button("Export Saves to App Folder", systemImage: "folder.badge.plus") {
                         do {
                             appState.libraryStore.ensureDirectories()
-                            let dst = appState.libraryStore.exportsDir.appendingPathComponent("\(game.folderName)-saves.zip")
+                            let dst = appState.libraryStore.exportsDir.appendingPathComponent("\(exportName)-saves.zip")
                             try appState.saveManager.exportSavesZip(from: saveDir, to: dst)
                             statusBanner = "Exported to Files > RenPlay > Exports > \(dst.lastPathComponent)"
                         } catch {
@@ -171,7 +232,7 @@ struct GameSaveManagerView: View {
                 Text("Backups (\(backups.count))")
             }
         }
-        .navigationTitle("Saves")
+        .navigationTitle(title)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Menu("Import", systemImage: "square.and.arrow.down") {
@@ -226,7 +287,7 @@ struct GameSaveManagerView: View {
     private func reload() {
         slots = appState.saveManager.listSaves(in: saveDir)
         backups = appState.saveManager.listBackups(in: backupDir)
-        let tempExport = FileManager.default.temporaryDirectory.appendingPathComponent("\(game.folderName)-saves.zip")
+        let tempExport = FileManager.default.temporaryDirectory.appendingPathComponent("\(exportName)-saves.zip")
         if !slots.isEmpty {
             try? appState.saveManager.exportSavesZip(from: saveDir, to: tempExport)
             exportedZipURL = tempExport

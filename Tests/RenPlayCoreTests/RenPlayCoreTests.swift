@@ -109,6 +109,73 @@ struct EngineDetectorTests {
         #expect(EngineSelector.selectEngine(detected: det753, available: engines, strategy: .accurate)?.version == "7.8.7")
         #expect(EngineSelector.selectEngine(detected: det753, available: engines, strategy: .latest)?.version == "7.8.7")
     }
+
+    @Test("Detects Ren'Py 8.2+ string vc_version.py, nested RPC2 .rpyc, cache filenames, and stored labels")
+    func detectModernVcVersionNestedRpycAndCache() throws {
+        let dir8 = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir8) }
+        let renpyDir = dir8.appendingPathComponent("renpy", isDirectory: true)
+        try FileManager.default.createDirectory(at: renpyDir, withIntermediateDirectories: true)
+        try """
+        branch = 'fix'
+        nightly = False
+        official = True
+        version = '8.3.7.25031702'
+        version_name = 'x'
+        """.write(to: renpyDir.appendingPathComponent("vc_version.py"), atomically: true, encoding: .utf8)
+
+        let detVc = RenPyVersionDetector.detectVersion(in: dir8)
+        #expect(detVc?.version == SemVer(major: 8, minor: 3, patch: 7))
+        #expect(detVc?.source == .vcVersionPy)
+
+        func buildRPC2File(pickleProto: UInt8) throws -> Data {
+            let compressed = try ZlibCodec.deflate(Data([0x80, pickleProto, 0x4E, 0x2E]), rawDeflate: false)
+            var out = Data("RENPY RPC2".utf8)
+            let start = UInt32(out.count + 24)
+            out.appendUInt32LE(1)
+            out.appendUInt32LE(start)
+            out.appendUInt32LE(UInt32(compressed.count))
+            out.appendUInt32LE(0)
+            out.appendUInt32LE(0)
+            out.appendUInt32LE(0)
+            out.append(compressed)
+            return out
+        }
+
+        let rpyc7Dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: rpyc7Dir) }
+        let nested7 = rpyc7Dir.appendingPathComponent("game/scripts/sub", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested7, withIntermediateDirectories: true)
+        try buildRPC2File(pickleProto: 0x02).write(to: nested7.appendingPathComponent("intro.rpyc"))
+        let detRpyc7 = RenPyVersionDetector.detectVersion(in: rpyc7Dir)
+        #expect(detRpyc7?.majorHint == 7)
+        #expect(detRpyc7?.source == .rpycHeader)
+
+        for proto: UInt8 in [0x03, 0x04] {
+            let rpyc8Dir = try makeTempDirectory()
+            defer { try? FileManager.default.removeItem(at: rpyc8Dir) }
+            let nested8 = rpyc8Dir.appendingPathComponent("game/scripts/sub", isDirectory: true)
+            try FileManager.default.createDirectory(at: nested8, withIntermediateDirectories: true)
+            try buildRPC2File(pickleProto: proto).write(to: nested8.appendingPathComponent("intro.rpyc"))
+            let detRpyc8 = RenPyVersionDetector.detectVersion(in: rpyc8Dir)
+            #expect(detRpyc8?.majorHint == 8)
+            #expect(detRpyc8?.source == .rpycHeader)
+        }
+
+        let cacheDir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDir) }
+        let gameCache = cacheDir.appendingPathComponent("game/cache", isDirectory: true)
+        try FileManager.default.createDirectory(at: gameCache, withIntermediateDirectories: true)
+        try Data().write(to: gameCache.appendingPathComponent("bytecode-311.rpyb"))
+        let detCache = RenPyVersionDetector.detectVersion(in: cacheDir)
+        #expect(detCache?.majorHint == 8)
+        #expect(detCache?.source == .cacheFileName)
+
+        #expect(RenPyVersionDetector.majorHint(fromRuntimeEntries: ["py3-windows-x86_64"]) == 8)
+        #expect(RenPyVersionDetector.majorHint(fromRuntimeEntries: ["windows-i686"]) == 7)
+        #expect(DetectedVersion(storedDescription: "8.x")?.majorHint == 8)
+        #expect(DetectedVersion(storedDescription: "7.8.7")?.version == SemVer(major: 7, minor: 8, patch: 7))
+    }
 }
 
 @Suite("RPAArchive Tests")
@@ -450,6 +517,49 @@ struct SaveAndLibraryTests {
         #expect(games.count == 2)
         #expect(games.contains(where: { $0.displayName == "DropArchive" && $0.detectedEngineVersion == "8.3.7" }))
         #expect(games.contains(where: { $0.displayName == "DropFolder" && $0.detectedEngineVersion == "8.5.3" }))
+    }
+
+    @Test("Keeps saves when removing a game with deleteSaves false and re-links them on re-import")
+    func retainAndReadoptKeptSaves() throws {
+        let rootDir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+        let sourceParent = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: sourceParent) }
+
+        let srcFolder = sourceParent.appendingPathComponent("KeepVN", isDirectory: true)
+        let srcGameDir = srcFolder.appendingPathComponent("game", isDirectory: true)
+        try FileManager.default.createDirectory(at: srcGameDir, withIntermediateDirectories: true)
+        try """
+        define config.save_directory = "KeepVN-1700000000"
+        """.write(to: srcGameDir.appendingPathComponent("options.rpy"), atomically: true, encoding: .utf8)
+        try "label start:\n    \"Hi\"\n".write(to: srcGameDir.appendingPathComponent("script.rpy"), atomically: true, encoding: .utf8)
+
+        let store = LibraryStore(rootDir: rootDir)
+        let first = try store.importGameFolder(from: srcFolder)
+        let originalSaveDir = store.saveDirectory(for: first)
+        try FileManager.default.createDirectory(at: originalSaveDir, withIntermediateDirectories: true)
+        try ArchiveExtractor.createZip(
+            fromFiles: [("extra_info", Data("Chapter 1".utf8))],
+            to: originalSaveDir.appendingPathComponent("1-1.save")
+        )
+
+        try store.deleteGame(first, deleteSaves: false)
+        #expect(FileManager.default.fileExists(atPath: originalSaveDir.path))
+
+        let orphans = store.listOrphanedSaveGroups()
+        #expect(orphans.count == 1)
+        #expect(orphans[0].displayName == "KeepVN")
+        #expect(orphans[0].slotCount == 1)
+
+        let reimported = try store.importGameFolder(from: srcFolder)
+        #expect(store.saveDirectory(for: reimported) == originalSaveDir)
+        #expect(SaveManager().listSaves(in: store.saveDirectory(for: reimported)).count == 1)
+        #expect(store.listOrphanedSaveGroups().isEmpty)
+
+        try store.deleteGame(reimported, deleteSaves: true)
+        #expect(!FileManager.default.fileExists(atPath: originalSaveDir.path))
+        #expect(!FileManager.default.fileExists(atPath: store.backupDirectory(for: reimported).path))
+        #expect(store.listOrphanedSaveGroups().isEmpty)
     }
 }
 

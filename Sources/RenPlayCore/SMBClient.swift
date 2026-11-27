@@ -384,13 +384,23 @@ public enum SMBClient {
         }
         if let renpyDirItem = rootItems.first(where: { $0.isDirectory && $0.name.lowercased() == "renpy" }) {
             let renpySub = (try? listDirectory(on: conn, path: renpyDirItem.relativePath)) ?? []
-            if let vcItem = renpySub.first(where: { !$0.isDirectory && $0.name.lowercased() == "vc_version.py" }) {
-                if let data = try? readWholeFile(on: conn, relPath: vcItem.relativePath, maxBytes: 16384) {
-                    let localRenpyDir = localGameDir.appendingPathComponent("renpy", isDirectory: true)
-                    try fm.createDirectory(at: localRenpyDir, withIntermediateDirectories: true)
-                    try data.write(to: localRenpyDir.appendingPathComponent("vc_version.py"), options: .atomic)
+            let versionFiles: [(name: String, maxBytes: Int)] = [("vc_version.py", 16384), ("__init__.py", 262_144)]
+            for file in versionFiles {
+                guard let item = renpySub.first(where: { !$0.isDirectory && $0.name.lowercased() == file.name }),
+                      let data = try? readWholeFile(on: conn, relPath: item.relativePath, maxBytes: file.maxBytes) else {
+                    continue
                 }
+                let localRenpyDir = localGameDir.appendingPathComponent("renpy", isDirectory: true)
+                try fm.createDirectory(at: localRenpyDir, withIntermediateDirectories: true)
+                try data.write(to: localRenpyDir.appendingPathComponent(file.name), options: .atomic)
             }
+        }
+
+        // Only directory names are read from lib/ and game/cache/; their contents stay on the share.
+        var remoteMajor: Int?
+        if let libItem = rootItems.first(where: { $0.isDirectory && $0.name.lowercased() == "lib" }),
+           let libEntries = try? listDirectory(on: conn, path: libItem.relativePath) {
+            remoteMajor = RenPyVersionDetector.majorHint(fromRuntimeEntries: libEntries.map(\.name))
         }
 
         progress?(0.15, "Scanning remote game directory...")
@@ -417,6 +427,10 @@ public enum SMBClient {
                     if current.depth == 0 && (item.name.lowercased() == "lib" || item.name.lowercased() == "renpy") {
                         continue
                     }
+                    if current.depth == 0 && remoteMajor == nil && item.name.lowercased() == "cache",
+                       let cacheEntries = try? listDirectory(on: conn, path: item.relativePath) {
+                        remoteMajor = RenPyVersionDetector.majorHint(fromCacheFileNames: cacheEntries.map(\.name))
+                    }
                     if skipDirs.contains(item.name.lowercased()) {
                         continue
                     }
@@ -435,6 +449,12 @@ public enum SMBClient {
             }
         }
 
+        let hintURL = localGameDir.appendingPathComponent(RenPyVersionDetector.remoteHintFileName)
+        try? fm.removeItem(at: hintURL)
+        if let remoteMajor {
+            try "\(remoteMajor)\n".write(to: hintURL, atomically: true, encoding: .utf8)
+        }
+
         let totalWork = max(1, collectedLoose.count + rpaFiles.count * 4)
         var doneWork = 0
 
@@ -443,8 +463,9 @@ public enum SMBClient {
             let ext = URL(fileURLWithPath: file.logical).pathExtension.lowercased()
             let lowerName = file.logical.lowercased()
             let isScript = Self.scriptExtensions.contains(ext) || lowerName.hasSuffix(".rpe.py")
+            let isVersionStamp = lowerName == "script_version.txt" && file.size <= 4096
 
-            if isScript && file.size <= UInt64(Self.maxSyncedScriptBytes) {
+            if (isScript && file.size <= UInt64(Self.maxSyncedScriptBytes)) || isVersionStamp {
                 progress?(0.2 + 0.45 * Double(doneWork) / Double(totalWork), "Syncing script: \(file.logical)")
                 let data = try readWholeFile(on: conn, relPath: file.smbFullRel, maxBytes: Self.maxSyncedScriptBytes)
                 let dest = try safeResolve(baseDir: localScriptGameDir, relativePath: file.logical)
