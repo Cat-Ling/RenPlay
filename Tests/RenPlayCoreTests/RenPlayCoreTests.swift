@@ -420,7 +420,7 @@ struct ArchiveExtractorTests {
             #expect(ArchiveExtractor.stripArchiveExtension(from: arcURL.lastPathComponent) == "NovelTitle")
         }
 
-        let sevenZPath = ["/home/singh/bin/7z", "/usr/bin/7z", "/usr/bin/7zz"]
+        let sevenZPath = ["/usr/bin/7z", "/usr/bin/7zz", "/usr/local/bin/7z"]
             .first { FileManager.default.isExecutableFile(atPath: $0) }
         if let sevenZPath {
             if let exeData = try? Data(contentsOf: URL(fileURLWithPath: "/bin/ls")) {
@@ -828,5 +828,107 @@ struct SMBStreamingTests {
         let decoded = try JSONDecoder().decode(AppSettings.self, from: encoded)
         #expect(decoded.showQuickBar == true)
         #expect(decoded.screenshotDestination == .photos)
+        #expect(decoded.gestures == GestureProfile())
+    }
+
+    @Test("GestureProfile defaults and GestureAction bridgeCommand round-trip")
+    func gestureDefaultsAndRoundTrip() throws {
+        let defaults = GestureProfile()
+        #expect(defaults.isEnabled == true)
+        #expect(defaults.twoFingerTap == .saveMenu)
+        #expect(defaults.threeFingerTap == .hideUI)
+        #expect(defaults.twoFingerSwipeLeft == .rollback)
+        #expect(defaults.twoFingerSwipeRight == .toggleSkip)
+        #expect(defaults.twoFingerSwipeUp == .historyMenu)
+        #expect(defaults.twoFingerSwipeDown == .gameMenu)
+
+        for action in GestureAction.allCases {
+            #expect(GestureAction(bridgeCommand: action.bridgeCommand) == action)
+        }
+
+        var settings = AppSettings()
+        settings.gestures.twoFingerTap = .loadMenu
+        settings.gestures.twoFingerSwipeDown = .toggleHUD
+        let encoded = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: encoded)
+        #expect(decoded.gestures.twoFingerTap == .loadMenu)
+        #expect(decoded.gestures.twoFingerSwipeDown == .toggleHUD)
+    }
+
+    @Test("SaveManager excludes mobile reload snapshots and normalizes uppercase save extensions")
+    func saveManagerExcludesReloadSlotsAndNormalizesCase() throws {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let saveDir = dir.appendingPathComponent("saves", isDirectory: true)
+        let backupDir = dir.appendingPathComponent("backups", isDirectory: true)
+        let importSrc = dir.appendingPathComponent("import", isDirectory: true)
+        try FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: importSrc, withIntermediateDirectories: true)
+
+        try Data("reload".utf8).write(to: saveDir.appendingPathComponent("_reload-1.save"))
+        try Data("reload".utf8).write(to: saveDir.appendingPathComponent("_reload-2.save"))
+        try Data("persist".utf8).write(to: saveDir.appendingPathComponent("persistent"))
+
+        let srcUpper = importSrc.appendingPathComponent("2-3.SAVE")
+        try ArchiveExtractor.createZip(
+            fromFiles: [("extra_info", Data("Imported".utf8))],
+            to: srcUpper
+        )
+
+        let sm = SaveManager()
+        let importedCount = try sm.importSaves(from: srcUpper, into: saveDir, backupDir: backupDir)
+        #expect(importedCount == 1)
+        #expect(FileManager.default.fileExists(atPath: saveDir.appendingPathComponent("2-3.save").path))
+
+        let slots = sm.listSaves(in: saveDir)
+        #expect(slots.map(\.filename).sorted() == ["2-3.save", "persistent"])
+        #expect(slots.first(where: { $0.filename == "2-3.save" })?.renpySlotName == "2-3")
+
+        let reloadSlot = SaveSlot(
+            filename: "_reload-1.save",
+            kind: .manual,
+            slotLabel: "_reload-1",
+            modifiedAt: Date(),
+            fileSize: 64
+        )
+        #expect(reloadSlot.renpySlotName == nil)
+    }
+
+    @Test("DiagnosticScrubber redacts container UUIDs, user home folders, and SMB details")
+    func diagnosticScrubberRedactsPathsAndSMB() {
+        let smb = SMBGameSource(
+            serverID: UUID(),
+            host: "nas.example.lan",
+            port: 445,
+            share: "VisualNovels",
+            remotePath: "Stories/Demo",
+            username: "player_one",
+            domain: "WORKGROUP",
+            isGuest: false
+        )
+        let raw = """
+        Game dir: /private/var/mobile/Containers/Data/Application/12345678-1234-1234-1234-1234567890AB/Documents/RenPlay/Games/Demo
+        Bundle: /var/mobile/Containers/Bundle/Application/ABCDEFAB-1234-5678-90AB-ABCDEFABCDEF/RenPlay.app
+        SMB: smb://player_one@nas.example.lan/VisualNovels/Stories/Demo domain=WORKGROUP
+        Traceback in /Users/exampleuser/Projects/Demo/game/script.rpy:12
+        """
+        let scrubbed = DiagnosticScrubber.scrub(
+            raw,
+            containerRoot: "/private/var/mobile/Containers/Data/Application/12345678-1234-1234-1234-1234567890AB",
+            bundlePath: "/var/mobile/Containers/Bundle/Application/ABCDEFAB-1234-5678-90AB-ABCDEFABCDEF/RenPlay.app",
+            smbSource: smb
+        )
+
+        #expect(!scrubbed.contains("12345678-1234-1234-1234-1234567890AB"))
+        #expect(!scrubbed.contains("ABCDEFAB-1234-5678-90AB-ABCDEFABCDEF"))
+        #expect(!scrubbed.contains("nas.example.lan"))
+        #expect(!scrubbed.contains("VisualNovels"))
+        #expect(!scrubbed.contains("player_one"))
+        #expect(!scrubbed.contains("WORKGROUP"))
+        #expect(!scrubbed.contains("exampleuser"))
+        #expect(scrubbed.contains("<AppContainer>"))
+        #expect(scrubbed.contains("<AppBundle>"))
+        #expect(scrubbed.contains("/Users/<User>/Projects/Demo/game/script.rpy:12"))
     }
 }

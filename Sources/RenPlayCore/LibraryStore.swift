@@ -970,7 +970,7 @@ public final class LibraryStore: @unchecked Sendable {
         ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? [])
             .filter {
                 let lower = $0.lastPathComponent.lowercased()
-                return lower.hasSuffix(".save") || lower == "persistent"
+                return (lower.hasSuffix(".save") && !lower.hasPrefix("_reload-")) || lower == "persistent"
             }
     }
 

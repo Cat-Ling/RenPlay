@@ -510,8 +510,9 @@ public struct SaveSlot: Identifiable, Sendable, Hashable {
     public var screenshotData: Data?
 
     public var renpySlotName: String? {
-        guard kind != .persistent else { return nil }
-        if filename.lowercased().hasSuffix(".save") {
+        let lower = filename.lowercased()
+        guard kind != .persistent, !lower.hasPrefix("_reload-") else { return nil }
+        if lower.hasSuffix(".save") {
             return String(filename.dropLast(5))
         }
         return filename
@@ -579,6 +580,123 @@ public enum ScreenshotDestination: String, Codable, Sendable, CaseIterable {
     }
 }
 
+public enum GestureAction: String, Codable, Sendable, CaseIterable {
+    case none
+    case saveMenu
+    case loadMenu
+    case gameMenu
+    case historyMenu
+    case preferencesMenu
+    case rollback
+    case toggleSkip
+    case autoForward
+    case hideUI
+    case quickSave
+    case quickLoad
+    case screenshot
+    case toggleKeyboard
+    case toggleHUD
+
+    public var displayName: String {
+        switch self {
+        case .none: return "Disabled"
+        case .saveMenu: return "Save Menu"
+        case .loadMenu: return "Load Menu"
+        case .gameMenu: return "Game Menu"
+        case .historyMenu: return "Dialogue History"
+        case .preferencesMenu: return "Game Preferences"
+        case .rollback: return "Rollback"
+        case .toggleSkip: return "Toggle Skip"
+        case .autoForward: return "Auto-Forward"
+        case .hideUI: return "Hide Dialogue"
+        case .quickSave: return "Quick Save"
+        case .quickLoad: return "Quick Load"
+        case .screenshot: return "Take Screenshot"
+        case .toggleKeyboard: return "Toggle Keyboard"
+        case .toggleHUD: return "Toggle Overlay"
+        }
+    }
+
+    public var bridgeCommand: Int32 {
+        switch self {
+        case .none: return 0
+        case .gameMenu: return 1
+        case .rollback: return 2
+        case .toggleSkip: return 3
+        case .autoForward: return 4
+        case .hideUI: return 5
+        case .screenshot: return 6
+        case .quickSave: return 7
+        case .quickLoad: return 8
+        case .toggleKeyboard: return 9
+        case .saveMenu: return 11
+        case .loadMenu: return 12
+        case .historyMenu: return 13
+        case .preferencesMenu: return 14
+        case .toggleHUD: return 15
+        }
+    }
+
+    public init(bridgeCommand: Int32) {
+        switch bridgeCommand {
+        case 1: self = .gameMenu
+        case 2: self = .rollback
+        case 3: self = .toggleSkip
+        case 4: self = .autoForward
+        case 5: self = .hideUI
+        case 6: self = .screenshot
+        case 7: self = .quickSave
+        case 8: self = .quickLoad
+        case 9: self = .toggleKeyboard
+        case 11: self = .saveMenu
+        case 12: self = .loadMenu
+        case 13: self = .historyMenu
+        case 14: self = .preferencesMenu
+        case 15: self = .toggleHUD
+        default: self = .none
+        }
+    }
+}
+
+public struct GestureProfile: Codable, Sendable, Equatable, Hashable {
+    public var isEnabled: Bool
+    public var twoFingerTap: GestureAction
+    public var threeFingerTap: GestureAction
+    public var twoFingerSwipeLeft: GestureAction
+    public var twoFingerSwipeRight: GestureAction
+    public var twoFingerSwipeUp: GestureAction
+    public var twoFingerSwipeDown: GestureAction
+
+    public init(
+        isEnabled: Bool = true,
+        twoFingerTap: GestureAction = .saveMenu,
+        threeFingerTap: GestureAction = .hideUI,
+        twoFingerSwipeLeft: GestureAction = .rollback,
+        twoFingerSwipeRight: GestureAction = .toggleSkip,
+        twoFingerSwipeUp: GestureAction = .historyMenu,
+        twoFingerSwipeDown: GestureAction = .gameMenu
+    ) {
+        self.isEnabled = isEnabled
+        self.twoFingerTap = twoFingerTap
+        self.threeFingerTap = threeFingerTap
+        self.twoFingerSwipeLeft = twoFingerSwipeLeft
+        self.twoFingerSwipeRight = twoFingerSwipeRight
+        self.twoFingerSwipeUp = twoFingerSwipeUp
+        self.twoFingerSwipeDown = twoFingerSwipeDown
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        twoFingerTap = try c.decodeIfPresent(GestureAction.self, forKey: .twoFingerTap) ?? .saveMenu
+        threeFingerTap = try c.decodeIfPresent(GestureAction.self, forKey: .threeFingerTap) ?? .hideUI
+        twoFingerSwipeLeft = try c.decodeIfPresent(GestureAction.self, forKey: .twoFingerSwipeLeft) ?? .rollback
+        twoFingerSwipeRight = try c.decodeIfPresent(GestureAction.self, forKey: .twoFingerSwipeRight) ?? .toggleSkip
+        twoFingerSwipeUp = try c.decodeIfPresent(GestureAction.self, forKey: .twoFingerSwipeUp) ?? .historyMenu
+        twoFingerSwipeDown = try c.decodeIfPresent(GestureAction.self, forKey: .twoFingerSwipeDown) ?? .gameMenu
+    }
+}
+
 public struct AppSettings: Codable, Sendable, Equatable {
     public var defaultEngineStrategy: EngineSelectionStrategy
     public var autoBackupCount: Int
@@ -603,6 +721,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var showQuickBar: Bool
     public var virtualMouseSpeed: Double
     public var screenshotDestination: ScreenshotDestination
+    public var gestures: GestureProfile
 
     public init(
         defaultEngineStrategy: EngineSelectionStrategy = .accurate,
@@ -627,7 +746,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
         showFPSOverlay: Bool = false,
         showQuickBar: Bool = false,
         virtualMouseSpeed: Double = 1.0,
-        screenshotDestination: ScreenshotDestination = .documents
+        screenshotDestination: ScreenshotDestination = .documents,
+        gestures: GestureProfile = GestureProfile()
     ) {
         self.defaultEngineStrategy = defaultEngineStrategy
         self.autoBackupCount = autoBackupCount
@@ -652,6 +772,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         self.showQuickBar = showQuickBar
         self.virtualMouseSpeed = virtualMouseSpeed
         self.screenshotDestination = screenshotDestination
+        self.gestures = gestures
     }
 
     public init(from decoder: Decoder) throws {
@@ -679,5 +800,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
         showQuickBar = try c.decodeIfPresent(Bool.self, forKey: .showQuickBar) ?? false
         virtualMouseSpeed = try c.decodeIfPresent(Double.self, forKey: .virtualMouseSpeed) ?? 1.0
         screenshotDestination = try c.decodeIfPresent(ScreenshotDestination.self, forKey: .screenshotDestination) ?? .documents
+        gestures = try c.decodeIfPresent(GestureProfile.self, forKey: .gestures) ?? GestureProfile()
     }
 }

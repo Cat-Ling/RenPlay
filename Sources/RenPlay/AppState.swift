@@ -32,6 +32,7 @@ public final class AppState {
         let root = docs.appendingPathComponent("RenPlay", isDirectory: true)
         let store = LibraryStore(rootDir: root)
         store.seedVisibleDocumentsFolderIfNeeded(documentsDir: docs)
+        AIHelp.install(documentsDir: docs)
         self.documentsDir = docs
         self.libraryStore = store
         self.appSettings = store.loadSettings()

@@ -109,6 +109,9 @@ public final class EngineLauncher {
         let screenshotDir = libraryStore.screenshotDirectory(for: game, documentsDir: documentsDir)
         let screenshotMode = appSettings.screenshotDestination.bridgeMode
         try fm.createDirectory(at: saveDir, withIntermediateDirectories: true)
+        for staleReload in ["_reload-1.save", "_reload-2.save"] {
+            try? fm.removeItem(at: saveDir.appendingPathComponent(staleReload))
+        }
         try fm.createDirectory(at: logDir, withIntermediateDirectories: true)
         try fm.createDirectory(at: multipersistentDir, withIntermediateDirectories: true)
         if appSettings.screenshotDestination != .photos {
@@ -172,6 +175,8 @@ public final class EngineLauncher {
 
         let orientationMode = Self.resolvedOrientationMode(game: game, appSettings: appSettings)
         renplay_set_preferred_orientation(orientationMode)
+        let gestures = appSettings.gestures
+        Self.applyGestureProfile(gestures)
 
         let variant: String
         if overrideVariants && !selectedVariants.isEmpty {
@@ -244,7 +249,8 @@ public final class EngineLauncher {
                                     mouseSpeed: mouseSpeed,
                                     initialTransparentTextboxes: transparentTextboxes != 0,
                                     initialVariants: variant.split(separator: " ").map(String.init),
-                                    screenshotDestMode: Int(screenshotMode)
+                                    screenshotDestMode: Int(screenshotMode),
+                                    initialGestures: gestures
                                 )
                             }
                         }
@@ -322,6 +328,18 @@ public final class EngineLauncher {
         }
     }
 
+    private static func applyGestureProfile(_ profile: GestureProfile) {
+        renplay_configure_gestures(
+            profile.isEnabled ? 1 : 0,
+            profile.twoFingerTap.bridgeCommand,
+            profile.threeFingerTap.bridgeCommand,
+            profile.twoFingerSwipeLeft.bridgeCommand,
+            profile.twoFingerSwipeRight.bridgeCommand,
+            profile.twoFingerSwipeUp.bridgeCommand,
+            profile.twoFingerSwipeDown.bridgeCommand
+        )
+    }
+
     private func installOverlay(
         gameID: UUID,
         gameName: String,
@@ -333,7 +351,8 @@ public final class EngineLauncher {
         mouseSpeed: Double,
         initialTransparentTextboxes: Bool,
         initialVariants: [String],
-        screenshotDestMode: Int
+        screenshotDestMode: Int,
+        initialGestures: GestureProfile
     ) {
         guard let scene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
@@ -355,6 +374,7 @@ public final class EngineLauncher {
             initialTransparentTextboxes: initialTransparentTextboxes,
             initialVariants: initialVariants,
             screenshotDestMode: screenshotDestMode,
+            initialGestures: initialGestures,
             onPersistSettings: { newOpacity, newFPS, newQuickBar, newMouseSpeed, newScreenshotMode in
                 var current = store.loadSettings()
                 current.overlayOpacity = newOpacity
@@ -362,6 +382,12 @@ public final class EngineLauncher {
                 current.showQuickBar = newQuickBar
                 current.virtualMouseSpeed = newMouseSpeed
                 current.screenshotDestination = ScreenshotDestination(bridgeMode: Int32(newScreenshotMode))
+                try? store.saveSettings(current)
+            },
+            onPersistGestures: { newGestures in
+                Self.applyGestureProfile(newGestures)
+                var current = store.loadSettings()
+                current.gestures = newGestures
                 try? store.saveSettings(current)
             }
         )
@@ -469,12 +495,16 @@ public final class EngineLauncher {
     def path_to_saves(gamedir, save_directory=None):
         override = os.environ.get("RENPY_SAVE_DIRECTORY", "")
         if override:
-            if not os.path.isdir(override):
+            if save_directory in ("tokens", "backups"):
+                target = os.path.join(os.path.dirname(override), "_" + save_directory)
+            else:
+                target = override
+            if not os.path.isdir(target):
                 try:
-                    os.makedirs(override)
+                    os.makedirs(target)
                 except OSError:
                     pass
-            return override
+            return target
 
         fallback = os.path.join(gamedir, "saves")
         if not os.path.isdir(fallback):
@@ -863,15 +893,47 @@ public final class EngineLauncher {
         import uuid as _renplay_uuid
 
         _renplay_safe_mode = _renplay_os.environ.get("RENPY_SAFE_MODE") == "1"
+        _renplay_pending_autoload = _renplay_os.environ.get("RENPY_AUTO_LOAD", "").strip()
+        _renplay_trust_autoload = False
+        if _renplay_pending_autoload:
+            _renplay_os.environ["RENPY_SKIP_SPLASHSCREEN"] = "1"
 
         def _renplay_clear_autoload():
+            global _renplay_pending_autoload
+            _renplay_pending_autoload = ""
             _renplay_os.environ.pop("RENPY_AUTO_LOAD", None)
+            _renplay_os.environ.pop("RENPY_SKIP_SPLASHSCREEN", None)
 
         try:
             if _renplay_clear_autoload not in config.after_load_callbacks:
                 config.after_load_callbacks.append(_renplay_clear_autoload)
         except Exception:
             pass
+
+        if not _renplay_safe_mode:
+            try:
+                _st_mod = getattr(renpy, "savetoken", None)
+                if _st_mod is not None and hasattr(_st_mod, "check_load") and not getattr(_st_mod, "_renplay_hooked", False):
+                    _orig_check_load = _st_mod.check_load
+
+                    def _renplay_check_load(log, signatures):
+                        if _renplay_pending_autoload or _renplay_trust_autoload:
+                            try:
+                                _vkeys = getattr(_st_mod, "verifying_keys", None)
+                                _get_keys = getattr(_st_mod, "get_keys_from_signatures", None)
+                                if _vkeys is not None and _get_keys is not None and signatures:
+                                    for _k in _get_keys(signatures):
+                                        if _k and _k not in _vkeys:
+                                            _vkeys.append(_k)
+                            except Exception:
+                                pass
+                            return True
+                        return _orig_check_load(log, signatures)
+
+                    _st_mod.check_load = _renplay_check_load
+                    _st_mod._renplay_hooked = True
+            except Exception:
+                pass
 
         if _renplay_safe_mode:
             try:
@@ -1002,6 +1064,7 @@ public final class EngineLauncher {
         _renplay_c_post_rpc_reply = None
         _renplay_c_get_ss_mode = None
         _renplay_c_on_ss_saved = None
+        _renplay_c_suppress_touch = None
 
         try:
             _renplay_self_lib = _renplay_ctypes.CDLL(None)
@@ -1063,6 +1126,11 @@ public final class EngineLauncher {
             if _renplay_c_on_ss_saved is not None:
                 _renplay_c_on_ss_saved.argtypes = [_renplay_ctypes.c_char_p, _renplay_ctypes.c_int]
                 _renplay_c_on_ss_saved.restype = None
+
+            _renplay_c_suppress_touch = getattr(_renplay_self_lib, "renplay_bridge_should_suppress_touch_mouse", None)
+            if _renplay_c_suppress_touch is not None:
+                _renplay_c_suppress_touch.argtypes = []
+                _renplay_c_suppress_touch.restype = _renplay_ctypes.c_int
         except Exception:
             _renplay_c_consume_cmd = None
 
@@ -1090,6 +1158,49 @@ public final class EngineLauncher {
 
         try:
             config.screenshot_callback = _renplay_screenshot_callback
+        except Exception:
+            pass
+
+        def _renplay_open_menu_screen(screen_name):
+            try:
+                in_menu = bool(renpy.context()._menu)
+                is_main = bool(getattr(store, "main_menu", False))
+                candidates = [screen_name]
+                if screen_name == "history":
+                    candidates.append("text_history")
+                if is_main and screen_name == "save":
+                    candidates = ["load"]
+                resolved = None
+                for cand in candidates:
+                    if renpy.has_screen(cand) or renpy.has_label(cand) or renpy.has_label(cand + "_screen"):
+                        resolved = cand
+                        break
+                if in_menu:
+                    if resolved and renpy.get_screen(resolved):
+                        if not is_main:
+                            _invoke_game_menu()
+                        return
+                    if resolved:
+                        renpy.run(ShowMenu(resolved))
+                    elif not is_main:
+                        _invoke_game_menu()
+                    return
+                if resolved:
+                    renpy.run(ShowMenu(resolved))
+                else:
+                    _invoke_game_menu()
+            except Exception:
+                pass
+
+        try:
+            _renplay_keymap = renpy.Keymap(
+                renplay_save_menu=lambda: _renplay_open_menu_screen("save"),
+                renplay_load_menu=lambda: _renplay_open_menu_screen("load"),
+                renplay_history_menu=lambda: _renplay_open_menu_screen("history"),
+                renplay_prefs_menu=lambda: _renplay_open_menu_screen("preferences"),
+            )
+            if _renplay_keymap not in config.underlay:
+                config.underlay.append(_renplay_keymap)
         except Exception:
             pass
 
@@ -1176,6 +1287,37 @@ public final class EngineLauncher {
                         _input_cls._renplay_hooked = True
                 except Exception:
                     pass
+
+        if not _renplay_safe_mode and _renplay_pg is not None and _renplay_c_suppress_touch is not None:
+            try:
+                _ctrl_mod = renpy.display.controller
+                if not getattr(_ctrl_mod, "_renplay_ctrl_hooked", False):
+                    _orig_ctrl_event = _ctrl_mod.event
+                    _mouse_ev_types = tuple(
+                        t for t in (
+                            getattr(_renplay_pg, "MOUSEBUTTONDOWN", None),
+                            getattr(_renplay_pg, "MOUSEBUTTONUP", None),
+                            getattr(_renplay_pg, "MOUSEMOTION", None),
+                        ) if t is not None
+                    )
+
+                    def _renplay_controller_event(ev):
+                        if ev is not None and ev.type in _mouse_ev_types and not getattr(ev, "renplay_virtual", False):
+                            try:
+                                if int(_renplay_c_suppress_touch()) != 0:
+                                    try:
+                                        renpy.display.gesture.recognizer.cancel()
+                                    except Exception:
+                                        pass
+                                    return None
+                            except Exception:
+                                pass
+                        return _orig_ctrl_event(ev)
+
+                    _ctrl_mod.event = _renplay_controller_event
+                    _ctrl_mod._renplay_ctrl_hooked = True
+            except Exception:
+                pass
 
         _renplay_mod_mask = 0
         _renplay_session_id = str(_renplay_uuid.uuid4())
@@ -1448,7 +1590,31 @@ public final class EngineLauncher {
         _renplay_mtype = _renplay_ctypes.c_int(0)
 
         def _renplay_poll_bridge():
-            global _renplay_mod_mask, _renplay_last_stats_report, _renplay_last_stats_flush
+            global _renplay_mod_mask, _renplay_last_stats_report, _renplay_last_stats_flush, _renplay_pending_autoload, _renplay_trust_autoload
+            if _renplay_pending_autoload and bool(getattr(store, "main_menu", False)):
+                _slot = _renplay_pending_autoload
+                _renplay_pending_autoload = ""
+                _renplay_os.environ.pop("RENPY_AUTO_LOAD", None)
+                _renplay_os.environ.pop("RENPY_SKIP_SPLASHSCREEN", None)
+                try:
+                    renpy.loadsave.location.scan()
+                except Exception:
+                    pass
+                if renpy.can_load(_slot):
+                    _renplay_trust_autoload = True
+                    try:
+                        renpy.run(FileLoad(_slot, confirm=False, slot=True))
+                    except (renpy.game.RestartTopContext, renpy.game.RestartContext):
+                        raise
+                    except Exception:
+                        try:
+                            renpy.load(_slot)
+                        except (renpy.game.RestartTopContext, renpy.game.RestartContext):
+                            raise
+                        except Exception:
+                            pass
+                    finally:
+                        _renplay_trust_autoload = False
             if _renplay_c_consume_cmd is None:
                 return
 
@@ -1544,18 +1710,21 @@ public final class EngineLauncher {
                                 pos=(px, py),
                                 rel=(0, 0),
                                 buttons=(0, 0, 0),
+                                renplay_virtual=True,
                             ))
                         elif etype == 1:
                             _renplay_pg.event.post(_renplay_pg.event.Event(
                                 _renplay_pg.MOUSEBUTTONDOWN,
                                 pos=(px, py),
                                 button=btn,
+                                renplay_virtual=True,
                             ))
                         elif etype == 2:
                             _renplay_pg.event.post(_renplay_pg.event.Event(
                                 _renplay_pg.MOUSEBUTTONUP,
                                 pos=(px, py),
                                 button=btn,
+                                renplay_virtual=True,
                             ))
                 except Exception:
                     pass
@@ -1571,44 +1740,53 @@ public final class EngineLauncher {
                 except Exception:
                     pass
 
-            try:
-                cmd = int(_renplay_c_consume_cmd())
-            except Exception:
-                return
-            if cmd == 0:
-                return
-            if cmd == 10:
-                seen, total = _renplay_collect_dialogue_counts()
-                _renplay_write_stats_file(seen, total)
+            while True:
                 try:
-                    renpy.loadsave.save_persistent()
+                    cmd = int(_renplay_c_consume_cmd())
+                except Exception:
+                    break
+                if cmd == 0:
+                    break
+                if cmd == 10:
+                    seen, total = _renplay_collect_dialogue_counts()
+                    _renplay_write_stats_file(seen, total)
+                    try:
+                        renpy.loadsave.save_persistent()
+                    except Exception:
+                        pass
+                    try:
+                        _renplay_sys.stdout.flush()
+                        _renplay_sys.stderr.flush()
+                    except Exception:
+                        pass
+                    _renplay_os._exit(0)
+                try:
+                    if cmd == 1:
+                        renpy.queue_event("game_menu")
+                    elif cmd == 2:
+                        renpy.queue_event("rollback")
+                    elif cmd == 3:
+                        renpy.queue_event("toggle_skip")
+                    elif cmd == 4:
+                        renpy.queue_event("toggle_afm")
+                    elif cmd == 5:
+                        renpy.queue_event("hide_windows")
+                    elif cmd == 6:
+                        renpy.queue_event("screenshot")
+                    elif cmd == 7:
+                        renpy.run(QuickSave())
+                    elif cmd == 8:
+                        renpy.run(QuickLoad(confirm=False))
+                    elif cmd == 11:
+                        renpy.queue_event("renplay_save_menu")
+                    elif cmd == 12:
+                        renpy.queue_event("renplay_load_menu")
+                    elif cmd == 13:
+                        renpy.queue_event("renplay_history_menu")
+                    elif cmd == 14:
+                        renpy.queue_event("renplay_prefs_menu")
                 except Exception:
                     pass
-                try:
-                    _renplay_sys.stdout.flush()
-                    _renplay_sys.stderr.flush()
-                except Exception:
-                    pass
-                _renplay_os._exit(0)
-            try:
-                if cmd == 1:
-                    renpy.queue_event("game_menu")
-                elif cmd == 2:
-                    renpy.queue_event("rollback")
-                elif cmd == 3:
-                    renpy.queue_event("toggle_skip")
-                elif cmd == 4:
-                    renpy.queue_event("toggle_afm")
-                elif cmd == 5:
-                    renpy.queue_event("hide_windows")
-                elif cmd == 6:
-                    renpy.queue_event("screenshot")
-                elif cmd == 7:
-                    renpy.run(QuickSave())
-                elif cmd == 8:
-                    renpy.run(QuickLoad(confirm=False))
-            except Exception:
-                pass
 
         if _renplay_poll_bridge not in config.periodic_callbacks:
             config.periodic_callbacks.append(_renplay_poll_bridge)

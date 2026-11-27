@@ -3,6 +3,7 @@
 
 #if canImport(UIKit)
 import CRenPlayBridge
+import RenPlayCore
 import UIKit
 
 final class GameOverlayWindow: UIWindow {
@@ -21,7 +22,9 @@ final class GameOverlayWindow: UIWindow {
         initialTransparentTextboxes: Bool,
         initialVariants: [String],
         screenshotDestMode: Int,
-        onPersistSettings: ((Double, Bool, Bool, Double, Int) -> Void)?
+        initialGestures: GestureProfile,
+        onPersistSettings: ((Double, Bool, Bool, Double, Int) -> Void)?,
+        onPersistGestures: ((GestureProfile) -> Void)?
     ) {
         let controller = GameOverlayViewController(
             gameID: gameID,
@@ -35,7 +38,9 @@ final class GameOverlayWindow: UIWindow {
             initialTransparentTextboxes: initialTransparentTextboxes,
             initialVariants: initialVariants,
             screenshotDestMode: screenshotDestMode,
-            onPersistSettings: onPersistSettings
+            initialGestures: initialGestures,
+            onPersistSettings: onPersistSettings,
+            onPersistGestures: onPersistGestures
         )
         self.overlayController = controller
         super.init(windowScene: windowScene)
@@ -72,6 +77,7 @@ private enum HudModalKind {
     case progress
     case variables
     case settings
+    case gestures
     case tools
     case exitConfirm
     case logs
@@ -127,7 +133,9 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
     private var transparentTextboxes: Bool
     private var selectedVariants: Set<String>
     private var screenshotDestMode: Int
+    private var gestures: GestureProfile
     private let onPersistSettings: ((Double, Bool, Bool, Double, Int) -> Void)?
+    private let onPersistGestures: ((GestureProfile) -> Void)?
     private var selectedRotationMode: Int = Int(renplay_get_preferred_orientation())
 
     // Dynamic modal views updated on RPC reply
@@ -169,7 +177,9 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         initialTransparentTextboxes: Bool,
         initialVariants: [String],
         screenshotDestMode: Int,
-        onPersistSettings: ((Double, Bool, Bool, Double, Int) -> Void)?
+        initialGestures: GestureProfile,
+        onPersistSettings: ((Double, Bool, Bool, Double, Int) -> Void)?,
+        onPersistGestures: ((GestureProfile) -> Void)?
     ) {
         self.gameID = gameID
         self.gameName = gameName
@@ -188,7 +198,9 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
             self.selectedVariants = Set(initialVariants)
         }
         self.screenshotDestMode = screenshotDestMode
+        self.gestures = initialGestures
         self.onPersistSettings = onPersistSettings
+        self.onPersistGestures = onPersistGestures
         let saved = UserDefaults.standard.stringArray(forKey: "renplay.savedVars.\(gameID.uuidString)") ?? []
         self.savedVarNames = Set(saved)
         super.init(nibName: nil, bundle: nil)
@@ -714,6 +726,8 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
             buildVariablesModal()
         case .settings:
             buildSettingsModal()
+        case .gestures:
+            buildGesturesModal()
         case .tools:
             buildToolsModal()
         case .exitConfirm:
@@ -994,6 +1008,86 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
             self.persistOverlaySettings()
         }, for: .valueChanged)
         modalBody.addArrangedSubview(makeLabeledRow("Screenshots", control: shotSeg))
+
+        modalBody.addArrangedSubview(makeSecondaryButton("Configure Touch Gestures...") { [weak self] in
+            self?.openModal(.gestures)
+        })
+    }
+
+    private func buildGesturesModal() {
+        modalHeaderIcon.image = UIImage(systemName: "hand.draw")
+        modalTitleLabel.text = "Touch Gestures"
+
+        let enableSwitch = UISwitch()
+        enableSwitch.isOn = gestures.isEnabled
+        enableSwitch.addAction(UIAction { [weak self, weak enableSwitch] _ in
+            guard let self, let enableSwitch else { return }
+            self.gestures.isEnabled = enableSwitch.isOn
+            self.onPersistGestures?(self.gestures)
+        }, for: .valueChanged)
+        modalBody.addArrangedSubview(makeLabeledRow("Enable Gestures", control: enableSwitch))
+
+        let specs: [(String, WritableKeyPath<GestureProfile, GestureAction>)] = [
+            ("Two-Finger Tap", \.twoFingerTap),
+            ("Three-Finger Tap", \.threeFingerTap),
+            ("2-Finger Swipe Left", \.twoFingerSwipeLeft),
+            ("2-Finger Swipe Right", \.twoFingerSwipeRight),
+            ("2-Finger Swipe Up", \.twoFingerSwipeUp),
+            ("2-Finger Swipe Down", \.twoFingerSwipeDown),
+        ]
+
+        for (title, keyPath) in specs {
+            let btn = UIButton(type: .system)
+            var cfg = UIButton.Configuration.filled()
+            cfg.title = gestures[keyPath: keyPath].displayName
+            cfg.baseBackgroundColor = UIColor(white: 0.17, alpha: 1.0)
+            cfg.baseForegroundColor = .systemBlue
+            cfg.cornerStyle = .medium
+            cfg.contentInsets = NSDirectionalEdgeInsets(top: 5, leading: 10, bottom: 5, trailing: 10)
+            cfg.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+                var copy = incoming
+                copy.font = .systemFont(ofSize: 12, weight: .semibold)
+                return copy
+            }
+            btn.configuration = cfg
+            btn.addAction(UIAction { [weak self, weak btn] _ in
+                guard let self, let btn else { return }
+                let sheet = UIAlertController(title: title, message: "Choose action", preferredStyle: .actionSheet)
+                for action in GestureAction.allCases {
+                    let prefix = self.gestures[keyPath: keyPath] == action ? "✓ " : ""
+                    sheet.addAction(UIAlertAction(title: "\(prefix)\(action.displayName)", style: .default) { [weak self, weak btn] _ in
+                        guard let self else { return }
+                        self.gestures[keyPath: keyPath] = action
+                        var updatedCfg = btn?.configuration
+                        updatedCfg?.title = action.displayName
+                        btn?.configuration = updatedCfg
+                        self.onPersistGestures?(self.gestures)
+                    })
+                }
+                sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+                if let pop = sheet.popoverPresentationController {
+                    pop.sourceView = btn
+                    pop.sourceRect = btn.bounds
+                }
+                self.present(sheet, animated: true)
+            }, for: .touchUpInside)
+            modalBody.addArrangedSubview(makeLabeledRow(title, control: btn))
+        }
+
+        let row = UIStackView()
+        row.axis = .horizontal
+        row.spacing = 8
+        row.distribution = .fillEqually
+        row.addArrangedSubview(makeSecondaryButton("Reset Defaults") { [weak self] in
+            guard let self else { return }
+            self.gestures = GestureProfile()
+            self.onPersistGestures?(self.gestures)
+            self.openModal(.gestures)
+        })
+        row.addArrangedSubview(makePrimaryButton("Back") { [weak self] in
+            self?.openModal(.settings)
+        })
+        modalBody.addArrangedSubview(row)
     }
 
     private func buildToolsModal() {
@@ -1376,6 +1470,10 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
     }
 
     private func pollEngineState() {
+        if renplay_consume_hud_toggle_request() != 0 {
+            toggleHUD()
+        }
+
         let shouldShowPill = renplay_should_show_keyboard_pill() != 0
         if keyboardPillButton.isHidden == shouldShowPill {
             keyboardPillButton.isHidden = !shouldShowPill

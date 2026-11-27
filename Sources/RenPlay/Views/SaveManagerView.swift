@@ -495,6 +495,7 @@ struct GameSaveManagerView: View {
     @State private var isSelecting = false
     @State private var selectedFilenames = Set<String>()
     @State private var inspectedSlot: SaveSlot?
+    @State private var pendingLaunchSlot: String?
     @State private var savePickerMode: SideloadPickerMode?
     @State private var exportedZipURL: URL?
     @State private var showLinkSheet = false
@@ -623,11 +624,21 @@ struct GameSaveManagerView: View {
                 }
             }
         }
-        .sheet(item: $inspectedSlot) { slot in
+        .sheet(item: $inspectedSlot, onDismiss: {
+            if let slotName = pendingLaunchSlot {
+                pendingLaunchSlot = nil
+                if let game = linkedGame,
+                   appState.resolvedEngine(for: game) != nil,
+                   !appState.isLaunching {
+                    appState.launch(game: game, autoloadSlot: slotName)
+                }
+            }
+        }) { slot in
             let loadAction: (() -> Void)? = if let game = linkedGame, let slotName = slot.renpySlotName {
                 {
                     guard appState.resolvedEngine(for: game) != nil, !appState.isLaunching else { return }
-                    appState.launch(game: game, autoloadSlot: slotName)
+                    pendingLaunchSlot = slotName
+                    inspectedSlot = nil
                 }
             } else {
                 nil
@@ -804,6 +815,7 @@ struct GameSaveManagerView: View {
 
     private func saveSlotCard(_ slot: SaveSlot) -> some View {
         let selected = selectedFilenames.contains(slot.filename)
+        let canDirectPlay = !isSelecting && linkedGame != nil && slot.renpySlotName != nil
         return Button {
             if isSelecting {
                 if selected {
@@ -811,6 +823,11 @@ struct GameSaveManagerView: View {
                 } else {
                     selectedFilenames.insert(slot.filename)
                 }
+            } else if let game = linkedGame,
+                      let slotName = slot.renpySlotName,
+                      appState.resolvedEngine(for: game) != nil,
+                      !appState.isLaunching {
+                appState.launch(game: game, autoloadSlot: slotName)
             } else {
                 inspectedSlot = slot
             }
@@ -851,6 +868,17 @@ struct GameSaveManagerView: View {
                                 .padding(6)
                         }
                     }
+                    .overlay(alignment: .bottomTrailing) {
+                        if canDirectPlay {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(6)
+                                .background(.black.opacity(0.6))
+                                .clipShape(.circle)
+                                .padding(6)
+                        }
+                    }
                     .overlay {
                         if isSelecting && selected {
                             RoundedRectangle(cornerRadius: 9)
@@ -883,12 +911,32 @@ struct GameSaveManagerView: View {
             .clipShape(.rect(cornerRadius: 12))
         }
         .buttonStyle(.plain)
+        .overlay(alignment: .topTrailing) {
+            if !isSelecting {
+                Button {
+                    inspectedSlot = slot
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 24, height: 24)
+                        .background(.black.opacity(0.55))
+                        .clipShape(.circle)
+                }
+                .buttonStyle(.plain)
+                .padding(14)
+                .accessibilityLabel("Save Details")
+            }
+        }
         .contextMenu {
             if let game = linkedGame, let slotName = slot.renpySlotName {
                 Button("Load Save & Play", systemImage: "play.fill") {
                     appState.launch(game: game, autoloadSlot: slotName)
                 }
                 .disabled(appState.resolvedEngine(for: game) == nil || appState.isLaunching)
+            }
+            Button("Save Details...", systemImage: "info.circle") {
+                inspectedSlot = slot
             }
             Button("Delete Save", systemImage: "trash", role: .destructive) {
                 slotPendingDelete = slot
@@ -989,7 +1037,6 @@ private struct SaveSlotDetailSheet: View {
                 if let onLoadAndPlay {
                     Section {
                         Button {
-                            dismiss()
                             onLoadAndPlay()
                         } label: {
                             Label("Load Save & Play", systemImage: "play.fill")

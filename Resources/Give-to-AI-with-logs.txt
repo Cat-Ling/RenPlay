@@ -1,0 +1,179 @@
+RENPLAY TROUBLESHOOTING GUIDE FOR AI ASSISTANTS
+Share this file with your session logs and game settings.
+
+==========================================================================
+0. FOR THE PLAYER
+==========================================================================
+Right after something goes wrong in a game, open that game's page in
+RenPlay, tap More (...), and tap Share Diagnostics for AI (or open Logs
+and tap the Share button). You can also open Settings > About > Share
+Diagnostics for AI for the most recently played game. Pick your AI chat app
+and describe what happened. RenPlay removes device container UUIDs, user
+folder names, and SMB share host/account strings before sharing.
+
+==========================================================================
+1. FOR THE AI ASSISTANT: READ THIS FIRST
+==========================================================================
+The player is usually not a programmer. Everything after section 1 is
+technical reference for you, not for the player. Do not dump internal file
+paths, C bridge symbols, or raw traceback jargon unless they ask.
+
+How to reply:
+- Keep replies short (under ~120 words), plain, and direct.
+- State the most likely cause in one clear sentence, then give ONE concrete
+  change as tap-by-tap steps inside RenPlay (which tab or button, which
+  setting).
+- Give one change at a time so you can see what fixed it.
+- Ask them to launch the game again and share new logs if it still fails.
+- Never tell them to delete or reinstall RenPlay: local games and saves
+  live inside the app's Documents folder unless backed up/exported first.
+- Never tell them to edit Python engine files by hand or bypass checks.
+
+Check the shared files first:
+- Confirm the shared *-settings.txt matches the game they are asking about
+  and check which Resolved Engine was used (e.g. 8.6.1 SDL3 vs 8.5.3 SDL2
+  vs 7.8.7 Py2.7).
+- If logs show a clear RenPlay app/runtime bug (or 3 setting tries failed),
+  stop guessing settings and provide the RENPLAY HANDOFF block from
+  section 7 so they can file an issue at:
+  https://github.com/Cat-Ling/RenPlay/issues
+
+==========================================================================
+2. HOW SETTINGS WORK (THREE LAYERS)
+==========================================================================
+1. Global Settings (Documents/RenPlay/settings.json via Settings tab):
+   - Engine Matching: Closest Version (accurate) or Latest in Branch.
+   - Default Rotation: Auto, Landscape, or Portrait.
+   - Allow Network by Default & Advanced Ren'Py Settings (Developer Mode,
+     Enable Console, Use Less Memory, Less Screen Updates, Force Rollback,
+     Force Skip, Skip Unseen Text, Transparent Textboxes, Allow Network
+     Access, Compatibility Patches, Override Device Variant, Volume).
+   - Overlay opacity, Quick Bar, FPS badge, Virtual Mouse speed, Screenshot
+     destination (Documents Folder / Photos App / Both), Touch Gestures,
+     and auto-backups kept (0-20).
+2. Game Settings (Game Page > Settings gear):
+   - Safe Mode, Engine picker (Auto or pinned version), Screen Rotation
+     always apply per game.
+   - Use Global Settings (on by default): when ON, the game reads the
+     Global Ren'Py Options above; turn OFF to override them for this game
+     only. Allow Network Access in Game Settings acts as an OR with
+     Global Allow Network.
+   - Safe Mode forces RENPY_LESS_MEMORY=1 and disables Compatibility
+     Patches, Dev Mode, Console, Force Rollback/Skip, Variant overrides,
+     touch suppression hook, and editable input reopen hook.
+3. In-Game Floating Overlay (tap floating dot button; long-press button to
+   toggle Quick Bar):
+   - Overlay Settings & Touch Gestures persist to settings.json right away.
+   - Session Overrides (Transparent Textbox, Device Variants, Gallery
+     Unlocker, Console, Reload Script, Variables) apply immediately via
+     JSON RPC for this session only (not saved permanently to GameSettings).
+
+==========================================================================
+3. BUNDLED ENGINES & RUNTIME MODEL
+==========================================================================
+RenPlay runs natively on iOS/iPadOS 17+ with standard sideloading (NO JIT
+required). MetalANGLE translates OpenGL ES to Metal. Bundled engines:
+- 8.6.1 (framework renpy8_6_1): Python 3.12, SDL3
+- 8.5.3 (framework renpy8_5_3): Python 3.12, SDL2
+- 8.4.1 (framework renpy8_4_1): Python 3.12, SDL2
+- 8.3.7 (framework renpy8_3_7): Python 3.9, SDL2
+- 7.8.7 (framework renpy7_8_7): Python 2.7, SDL2
+
+Important lifecycle rule:
+- Only ONE dynamic Ren'Py framework can be dlopen'd per iOS process run.
+  Quitting a game exits cleanly (Darwin._exit(0)) so iOS relaunches fresh,
+  or if the engine returns early an error prompts the user to reopen.
+
+==========================================================================
+4. ENGINE ENVIRONMENT SWITCHES (SET BY RENPLAY BEFORE DLOPEN)
+==========================================================================
+All keys below are configured automatically by RenPlay's native bridge from
+UI toggles; players never edit env vars directly:
+- RENPY_GAME_DIRECTORY: resolved game root folder.
+- RENPY_SAVE_DIRECTORY: save folder (per saveIdentifier, or game UUID).
+  "tokens" / "backups" resolve to sibling _tokens / _backups directories.
+- RENPY_LOG_DIRECTORY: logs folder holding renplay_session.log.
+- RENPY_MULTIPERSISTENT: shared Documents/RenPlay/Saves/_Multipersistent.
+- RENPY_PLATFORM: fixed to "ios-arm64".
+- RENPY_VARIANT: space-separated UI variants (default "tablet touch" on
+  iPad, "phone touch" on iPhone, or custom Selected Variants).
+- RENPY_AUTO_LOAD: optional slot name passed by Resume or clicking a save.
+- RENPY_SKIP_SPLASHSCREEN: set to "1" while RENPY_AUTO_LOAD is pending so
+  splashscreens do not stall direct save launches.
+- RENPY_SCREENSHOT_PATTERN: Documents/Screenshots/<Game>/screenshot%04d.png
+  when saving to Documents or temporary folder when saving to Photos only.
+- RENPY_SAFE_MODE: "1" enables Safe Mode.
+- RENPY_COMPAT_PATCHES: "1" shims os.startfile, ctypes.windll (plus
+  GetSystemMetrics), backslash path normalization, and disables mobile
+  quit-on-background / autoreload.
+- RENPY_LESS_MEMORY: set (or unset when off; Ren'Py checks key presence).
+- RENPY_LESS_UPDATES: set (or unset when off; Ren'Py checks key presence).
+- RENPY_ALLOW_NETWORK: "0" blocks non-localhost socket.socket.connect.
+- RENPY_DEV_MODE / RENPY_ENABLE_CONSOLE: enables config.developer / console.
+- RENPY_FORCE_ROLLBACK / RENPY_FORCE_SKIP / RENPY_FORCE_UNSEEN_SKIP:
+  forces rollback, skipping, and unseen-text skipping in overrides.
+- RENPY_TRANSPARENT_TEXTBOX: applies semi-transparent say_window style.
+- RENPY_MASTER_VOLUME: clamped float 0.00-1.00 applied to main mixer.
+- RENPY_SEARCHPATH: optional extra Ren'Py searchpath entries from engine.
+
+==========================================================================
+5. COMMON SYMPTOMS & WHAT TO CHANGE
+==========================================================================
+- Crash / black screen / closes suddenly while loading heavy scenes:
+  Turn ON Safe Mode (Game Page > Settings > Safe Mode) or turn OFF Use
+  Global Settings and enable Use Less Memory + Less Screen Updates. Abrupt
+  log endings with no Python traceback usually mean iOS Jetsam memory kill.
+- Python syntax / bytecode / Version mismatch error on launch:
+  Check Detected Ren'Py Version in *-settings.txt vs Resolved Engine. Pin
+  7.8.7 for Ren'Py 7 / Python 2 games; try 8.4.1 or 8.5.3 if an 8.x game
+  hits an SDL3 regression on 8.6.1.
+- Script errors on Windows APIs (ctypes.windll, os.startfile, "\" paths):
+  Turn ON Compatibility Patches (off in Safe Mode).
+- "Network access disabled by RenPlay" in traceback:
+  Game Page > Settings > Allow Network Access -> ON.
+- Cut-off buttons, tiny text, or wrong mobile/PC UI layout:
+  Game Page > Settings > Screen Rotation -> try Landscape, or turn OFF
+  Use Global Settings, enable Override Device Variant, and pick "pc" +
+  "large" (or use HUD > Variants live during a session).
+- Missing saves after deleting/re-importing or upgrading a game:
+  Game Page > Details > Save Folder (or Saves tab) to relink kept saves.
+  Note: internal _reload-1/_reload-2 mobile snapshots are excluded from
+  Resume/Save lists and cleared before launch so direct save loads work.
+- LAN (SMB) game fails after editing PC scripts:
+  Game Page > More > Sync Scripts to refresh the SMB script index.
+- Accidental dialogue clicks while using 2- or 3-finger touch gestures:
+  Safe Mode disables the gesture touch-filter hook; turn OFF Safe Mode or
+  adjust Touch Gestures in Settings / HUD.
+
+==========================================================================
+6. READING THE LOGS
+==========================================================================
+Files shared (when present in the game's log folder):
+- renplay_session.log: combined stdout/stderr plus [RenPlay] native bridge
+  lines (glGetString MetalANGLE renderer, dlopen status, SMB mount notes).
+- traceback.txt: Ren'Py's formatted Python exception traceback and script
+  location when a Ren'Py script error occurred.
+- log.txt: Ren'Py's internal startup, display, GL, and load timing log.
+
+Watch for:
+- "dlopen failed" / "MetalANGLE dlopen failed": bundled framework issue.
+- "[RenPlay] ... SMB": SMBv2 connection/auth/share path failures.
+- Abrupt end mid-load with no "RenPlay engine exited": iOS memory kill
+  (try Use Less Memory + Less Screen Updates, or Safe Mode).
+- "Exception:" / "AttributeError:" / "ImportError:" in traceback.txt:
+  Python 2 vs 3 game mismatch, Compatibility Patches needed, or game bug.
+
+==========================================================================
+7. DEVELOPER HANDOFF (WHEN A CODE FIX IS NEEDED)
+==========================================================================
+If 3 setting changes fail or the logs point to an app/bridge bug, give the
+player one copyable block to post on GitHub Issues
+(https://github.com/Cat-Ling/RenPlay/issues) along with the scrubbed logs:
+
+  RENPLAY HANDOFF
+  Game: <title>, Ren'Py <detected version>, storage <local/LAN>
+  Engine: <resolved engine + SDL2/SDL3>
+  Symptom: <what happens and when>
+  Settings tried: <changes tested and results>
+  Evidence: <3-10 scrubbed lines from traceback.txt or renplay_session.log>
+  Diagnosis: <likely layer (bridge, overrides, engine pack, SMB, UI)>

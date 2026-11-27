@@ -23,7 +23,12 @@ enum {
     RENPLAY_CMD_QUICK_SAVE = 7,
     RENPLAY_CMD_QUICK_LOAD = 8,
     RENPLAY_CMD_TOGGLE_KEYBOARD = 9,
-    RENPLAY_CMD_QUIT = 10
+    RENPLAY_CMD_QUIT = 10,
+    RENPLAY_CMD_SAVE_MENU = 11,
+    RENPLAY_CMD_LOAD_MENU = 12,
+    RENPLAY_CMD_HISTORY_MENU = 13,
+    RENPLAY_CMD_PREFS_MENU = 14,
+    RENPLAY_CMD_TOGGLE_HUD = 15
 };
 
 // Swizzles UIWindow presentation so SDL2/SDL3 windows automatically bind to the active UIWindowScene.
@@ -73,6 +78,18 @@ int renplay_get_preferred_orientation(void);
 // Screenshot destination mode: 0=Documents, 1=Photos, 2=Both.
 void renplay_set_screenshot_destination(int mode);
 int renplay_get_screenshot_destination(void);
+
+// Multi-touch game gesture bindings attached to SDL_uikitwindow.
+void renplay_configure_gestures(
+    int enabled,
+    int twoFingerTapCmd,
+    int threeFingerTapCmd,
+    int twoFingerSwipeLeftCmd,
+    int twoFingerSwipeRightCmd,
+    int twoFingerSwipeUpCmd,
+    int twoFingerSwipeDownCmd
+);
+int renplay_consume_hud_toggle_request(void);
 
 // Reads latest dialogue progress counters reported by Python.
 void renplay_get_dialogue_stats(int *seenOut, int *totalOut);
@@ -145,6 +162,7 @@ int renplay_bridge_consume_rpc(char *buf, size_t bufSize);
 void renplay_bridge_post_rpc_reply(const char *jsonUTF8);
 int renplay_bridge_get_screenshot_mode(void);
 void renplay_bridge_on_screenshot_saved(const char *filePath, int deleteAfterSave);
+int renplay_bridge_should_suppress_touch_mouse(void);
 
 #ifdef __cplusplus
 }

@@ -53,6 +53,17 @@ struct SettingsView: View {
                             Text(dest.displayName).tag(dest)
                         }
                     }
+                    NavigationLink {
+                        TouchGesturesSettingsView(appState: appState)
+                    } label: {
+                        HStack {
+                            Text("Touch Gestures")
+                            Spacer()
+                            Text(appState.appSettings.gestures.isEnabled ? "On" : "Off")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     Stepper(
                         "Backups Kept: \(appState.appSettings.autoBackupCount)",
                         value: $appState.appSettings.autoBackupCount,
@@ -116,6 +127,7 @@ struct SettingsView: View {
                 }
 
                 Section("About") {
+                    AIHelpButton(appState: appState, game: nil)
                     Button("Install Demo Game") {
                         appState.installDemoGame()
                     }
@@ -210,6 +222,50 @@ struct AdvancedRenPySettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showVariantPicker) {
             VariantSelectionSheet(selectedVariants: $appState.appSettings.globalSelectedVariants)
+        }
+    }
+}
+
+struct TouchGesturesSettingsView: View {
+    @Bindable var appState: AppState
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Enable Touch Gestures", isOn: $appState.appSettings.gestures.isEnabled)
+            } footer: {
+                Text("Uses multi-finger taps and swipes so single-finger dialogue advancement and choices remain instant.")
+            }
+
+            Section("Taps") {
+                actionPicker("Two-Finger Tap", selection: $appState.appSettings.gestures.twoFingerTap)
+                actionPicker("Three-Finger Tap", selection: $appState.appSettings.gestures.threeFingerTap)
+            }
+            .disabled(!appState.appSettings.gestures.isEnabled)
+
+            Section("Two-Finger Swipes") {
+                actionPicker("Swipe Left", selection: $appState.appSettings.gestures.twoFingerSwipeLeft)
+                actionPicker("Swipe Right", selection: $appState.appSettings.gestures.twoFingerSwipeRight)
+                actionPicker("Swipe Up", selection: $appState.appSettings.gestures.twoFingerSwipeUp)
+                actionPicker("Swipe Down", selection: $appState.appSettings.gestures.twoFingerSwipeDown)
+            }
+            .disabled(!appState.appSettings.gestures.isEnabled)
+
+            Section {
+                Button("Reset to Defaults") {
+                    appState.appSettings.gestures = GestureProfile()
+                }
+            }
+        }
+        .navigationTitle("Touch Gestures")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func actionPicker(_ title: String, selection: Binding<GestureAction>) -> some View {
+        Picker(title, selection: selection) {
+            ForEach(GestureAction.allCases, id: \.self) { action in
+                Text(action.displayName).tag(action)
+            }
         }
     }
 }

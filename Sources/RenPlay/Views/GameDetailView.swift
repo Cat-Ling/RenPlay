@@ -34,6 +34,14 @@ struct GameDetailView: View {
         .onAppear {
             reloadSaves()
         }
+        .onChange(of: showSaveLinkSheet) { _, isPresented in
+            if !isPresented {
+                reloadSaves()
+            }
+        }
+        .onChange(of: game?.saveIdentifier) { _, _ in
+            reloadSaves()
+        }
     }
 
     private func detailScroll(for game: GameEntry) -> some View {
@@ -279,7 +287,7 @@ struct GameDetailView: View {
             .frame(maxWidth: .infinity)
 
             NavigationLink {
-                SessionLogViewer(logDir: appState.libraryStore.logDirectory(for: game))
+                SessionLogViewer(appState: appState, game: game)
             } label: {
                 quickActionCircle(title: "Logs", systemImage: "doc.text")
             }
@@ -305,6 +313,7 @@ struct GameDetailView: View {
                     draftInput = game.gameVersion ?? ""
                     showVersionAlert = true
                 }
+                AIHelpButton(appState: appState, game: game)
                 Menu("Category", systemImage: "tag") {
                     Button("None") {
                         var copy = game
@@ -829,8 +838,13 @@ struct VariantSelectionSheet: View {
 }
 
 struct SessionLogViewer: View {
-    let logDir: URL
+    let appState: AppState
+    let game: GameEntry
     @State private var logText = ""
+
+    private var logDir: URL {
+        appState.libraryStore.logDirectory(for: game)
+    }
 
     var body: some View {
         ScrollView {
@@ -843,6 +857,7 @@ struct SessionLogViewer: View {
         .navigationTitle("Session Logs")
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
+                AIHelpButton(appState: appState, game: game, label: "Share for AI", systemImage: "square.and.arrow.up")
                 Button("Copy", systemImage: "doc.on.doc") {
                     UIPasteboard.general.string = logText
                 }

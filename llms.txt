@@ -1,0 +1,20 @@
+# RenPlay
+
+> Native iOS and iPadOS visual novel player for Ren'Py games (versions 7.8.7 through 8.6.1), built with Swift 6, SwiftUI, Objective-C/C, MetalANGLE, and xtool. No JIT required.
+
+## Core Documentation
+
+- [README.md](README.md): Project overview, features, installation, and repository map.
+- [AGENTS.md](AGENTS.md): Architectural invariants, SPM target graph, build commands, and coding rules for AI agents.
+- [BUILDING.md](BUILDING.md): Toolchain setup, engine framework assembly, local IPA builds, and CI workflows.
+- [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md): Third-party components, upstream origins, and licenses.
+
+## Technical Subsystems
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): Dynamic engine loading, MetalANGLE preloading, `UIWindowScene` swizzling, `engine_main.py`, and `99renplay_overrides.rpy`.
+- [docs/INPUT_AND_OVERLAY.md](docs/INPUT_AND_OVERLAY.md): Virtual mouse trackpad, multi-touch gesture remapping, native iOS keyboard bridge, and passthrough overlay window.
+- [docs/STORAGE_SAVES_AND_SMB.md](docs/STORAGE_SAVES_AND_SMB.md): Storage layout, streaming archive extraction, SMBv2/v3 LAN playback, save slot auto-loading, and screenshot routing.
+
+## Player Support Guide
+
+- [Resources/Give-to-AI-with-logs.txt](Resources/Give-to-AI-with-logs.txt): Bundled troubleshooting reference shared alongside scrubbed logs by the app's diagnostics exporter.

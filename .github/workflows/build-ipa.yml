@@ -38,6 +38,9 @@ jobs:
         with:
           swift-version: '6.2'
 
+      - name: Verify docs and script parity
+        run: python3 scripts/check_docs_and_ai_guide.py
+
       - name: Run unit tests
         run: swift test --filter RenPlayCoreTests
 

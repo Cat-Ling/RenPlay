@@ -6,6 +6,18 @@ import Foundation
 public final class SaveManager: Sendable {
     public init() {}
 
+    private func normalizedSaveFilename(for url: URL) -> String? {
+        let name = url.lastPathComponent
+        let lower = name.lowercased()
+        if lower == "persistent" {
+            return "persistent"
+        }
+        if lower.hasSuffix(".save"), !lower.hasPrefix("_reload-") {
+            return name.hasSuffix(".save") ? name : String(name.dropLast(5)) + ".save"
+        }
+        return nil
+    }
+
     public func listSaves(in saveDir: URL) -> [SaveSlot] {
         let fm = FileManager.default
         guard let urls = try? fm.contentsOfDirectory(
@@ -18,9 +30,9 @@ public final class SaveManager: Sendable {
 
         var slots: [SaveSlot] = []
         for url in urls {
+            guard normalizedSaveFilename(for: url) != nil else { continue }
             let name = url.lastPathComponent
             let lower = name.lowercased()
-            guard lower.hasSuffix(".save") || lower == "persistent" else { continue }
 
             let attrs = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
             let modDate = attrs?.contentModificationDate ?? Date.distantPast
@@ -88,10 +100,7 @@ public final class SaveManager: Sendable {
         let fm = FileManager.default
         guard fm.fileExists(atPath: saveDir.path) else { return nil }
         let items = (try? fm.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
-        let saveFiles = items.filter {
-            let l = $0.lastPathComponent.lowercased()
-            return l.hasSuffix(".save") || l == "persistent"
-        }
+        let saveFiles = items.filter { normalizedSaveFilename(for: $0) != nil }
         guard !saveFiles.isEmpty else { return nil }
 
         var payload: [(String, Data)] = []
@@ -145,8 +154,8 @@ public final class SaveManager: Sendable {
         try fm.createDirectory(at: saveDir, withIntermediateDirectories: true)
 
         let ext = sourceURL.pathExtension.lowercased()
-        if ext == "save" || sourceURL.lastPathComponent.lowercased() == "persistent" {
-            let dst = saveDir.appendingPathComponent(sourceURL.lastPathComponent)
+        if let normalizedName = normalizedSaveFilename(for: sourceURL) {
+            let dst = saveDir.appendingPathComponent(normalizedName)
             if fm.fileExists(atPath: dst.path) {
                 if let backupDir {
                     _ = try? createBackup(of: saveDir, to: backupDir, maxBackups: 10)
@@ -168,9 +177,8 @@ public final class SaveManager: Sendable {
             var imported = 0
             if let enumerator = fm.enumerator(at: tempDir, includingPropertiesForKeys: [.isRegularFileKey]) {
                 while let url = enumerator.nextObject() as? URL {
-                    let name = url.lastPathComponent.lowercased()
-                    if name.hasSuffix(".save") || name == "persistent" {
-                        let dst = saveDir.appendingPathComponent(url.lastPathComponent)
+                    if let normalizedName = normalizedSaveFilename(for: url) {
+                        let dst = saveDir.appendingPathComponent(normalizedName)
                         if fm.fileExists(atPath: dst.path) {
                             try fm.removeItem(at: dst)
                         }
@@ -189,11 +197,52 @@ public final class SaveManager: Sendable {
         let fm = FileManager.default
         let items = (try? fm.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
         let payload: [(String, Data)] = items.compactMap { url in
-            let l = url.lastPathComponent.lowercased()
-            guard l.hasSuffix(".save") || l == "persistent",
+            guard normalizedSaveFilename(for: url) != nil,
                   let data = try? Data(contentsOf: url) else { return nil }
             return (url.lastPathComponent, data)
         }
         try ArchiveExtractor.createZip(fromFiles: payload, to: zipURL)
+    }
+}
+
+public enum DiagnosticScrubber {
+    public static func scrub(
+        _ text: String,
+        containerRoot: String? = nil,
+        bundlePath: String? = nil,
+        smbSource: SMBGameSource? = nil
+    ) -> String {
+        var result = text
+        if let bundlePath, !bundlePath.isEmpty {
+            result = result.replacingOccurrences(of: bundlePath, with: "<AppBundle>")
+        }
+        if let containerRoot, !containerRoot.isEmpty {
+            result = result.replacingOccurrences(of: containerRoot, with: "<AppContainer>")
+        }
+        let patternReplacements: [(String, String)] = [
+            (#"(?:/private)?/var/mobile/Containers/(?:Data|Bundle)/Application/[0-9A-Fa-f-]{36}"#, "<AppContainer>"),
+            (#"/Users/[^/\s"'<>]+"#, "/Users/<User>"),
+            (#"/home/[^/\s"'<>]+"#, "/home/<User>"),
+            (#"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]+@"#, "$1<User>@"),
+            (#"smb://[^/\s"']+/[^/\s"']+"#, "smb://<SMBHost>/<SMBShare>"),
+        ]
+        for (pattern, replacement) in patternReplacements {
+            result = result.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
+        }
+        if let smbSource {
+            if !smbSource.host.isEmpty {
+                result = result.replacingOccurrences(of: smbSource.host, with: "<SMBHost>")
+            }
+            if !smbSource.share.isEmpty {
+                result = result.replacingOccurrences(of: smbSource.share, with: "<SMBShare>")
+            }
+            if !smbSource.username.isEmpty {
+                result = result.replacingOccurrences(of: smbSource.username, with: "<SMBUser>")
+            }
+            if !smbSource.domain.isEmpty {
+                result = result.replacingOccurrences(of: smbSource.domain, with: "<SMBDomain>")
+            }
+        }
+        return result
     }
 }

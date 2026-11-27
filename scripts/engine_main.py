@@ -71,12 +71,16 @@ def path_to_common(renpy_base):
 def path_to_saves(gamedir, save_directory=None):
     override = os.environ.get("RENPY_SAVE_DIRECTORY", "")
     if override:
-        if not os.path.isdir(override):
+        if save_directory in ("tokens", "backups"):
+            target = os.path.join(os.path.dirname(override), "_" + save_directory)
+        else:
+            target = override
+        if not os.path.isdir(target):
             try:
-                os.makedirs(override)
+                os.makedirs(target)
             except OSError:
                 pass
-        return override
+        return target
 
     fallback = os.path.join(gamedir, "saves")
     if not os.path.isdir(fallback):

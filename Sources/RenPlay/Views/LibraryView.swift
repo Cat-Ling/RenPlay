@@ -357,8 +357,22 @@ struct LibraryView: View {
 
     @ViewBuilder
     private func cardContextMenu(for game: GameEntry) -> some View {
-        Button("Play", systemImage: "play.fill") {
-            appState.launch(game: game)
+        let newestSlot = appState.saveManager
+            .listSaves(in: appState.libraryStore.saveDirectory(for: game))
+            .filter { $0.renpySlotName != nil }
+            .max(by: { $0.modifiedAt < $1.modifiedAt })?
+            .renpySlotName
+        if let newestSlot {
+            Button("Resume", systemImage: "play.fill") {
+                appState.launch(game: game, autoloadSlot: newestSlot)
+            }
+            Button("Main Menu", systemImage: "house") {
+                appState.launch(game: game, autoloadSlot: nil)
+            }
+        } else {
+            Button("Play", systemImage: "play.fill") {
+                appState.launch(game: game)
+            }
         }
         Button("Game Settings", systemImage: "gearshape") {
             gameSettingsTarget = game

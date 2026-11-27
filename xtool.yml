@@ -6,3 +6,4 @@ iconPath: Resources/AppIcon.png
 resources:
   - BundleResources/Frameworks
   - BundleResources/Engines
+  - Resources/Give-to-AI-with-logs.txt
