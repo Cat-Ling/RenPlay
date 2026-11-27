@@ -14,9 +14,12 @@ private enum LibrarySortOrder: String, CaseIterable {
 
 struct LibraryView: View {
     @Bindable var appState: AppState
+    @Environment(\.scenePhase) private var scenePhase
     @State private var searchText = ""
     @State private var sortOrder: LibrarySortOrder = .recent
-    @State private var showFileImporter = false
+    @State private var activePickerMode: SideloadPickerMode?
+    @State private var showWiFiUpload = false
+    @State private var showURLDownload = false
     @State private var selectedGame: GameEntry?
 
     private var filteredGames: [GameEntry] {
@@ -64,29 +67,38 @@ struct LibraryView: View {
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button("Refresh", systemImage: "arrow.clockwise") {
-                        appState.refreshLibrary()
+                        appState.scanDropzones(silentIfEmpty: true)
                     }
-                    Button("Import Game", systemImage: "plus") {
-                        showFileImporter = true
+                    Menu("Import Game", systemImage: "plus") {
+                        importMenuItems
                     }
                 }
             }
             .navigationDestination(for: GameEntry.self) { game in
                 GameDetailView(appState: appState, gameID: game.id)
             }
-            .fileImporter(
-                isPresented: $showFileImporter,
-                allowedContentTypes: [
-                    .zip,
-                    .folder,
-                    UTType(filenameExtension: "apk") ?? .data,
-                    UTType(filenameExtension: "tar") ?? .data,
-                    .gzip,
-                ],
-                allowsMultipleSelection: true
-            ) { result in
-                if case .success(let urls) = result {
-                    appState.importFiles(urls)
+            .sheet(item: $activePickerMode) { mode in
+                SideloadDocumentPicker(
+                    mode: mode,
+                    onPick: { items in
+                        activePickerMode = nil
+                        appState.importPickedItems(items)
+                    },
+                    onError: { msg in
+                        activePickerMode = nil
+                        appState.activeError = msg
+                    }
+                )
+            }
+            .sheet(isPresented: $showWiFiUpload) {
+                WiFiUploadSheetView(appState: appState)
+            }
+            .sheet(isPresented: $showURLDownload) {
+                URLDownloadSheetView(appState: appState)
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    appState.scanDropzones(silentIfEmpty: true)
                 }
             }
             .overlay {
@@ -99,14 +111,37 @@ struct LibraryView: View {
         }
     }
 
+    @ViewBuilder
+    private var importMenuItems: some View {
+        Button("Import Archive (.zip / .apk / .tar.gz)", systemImage: "doc.zipper") {
+            activePickerMode = .archiveCopy
+        }
+        Button("Import Archive (In-Place / LiveContainer)", systemImage: "externaldrive.badge.plus") {
+            activePickerMode = .archiveInPlace
+        }
+        Button("Import Game Folder", systemImage: "folder") {
+            activePickerMode = .folder
+        }
+        Divider()
+        Button("Wi-Fi Browser Upload", systemImage: "wifi") {
+            showWiFiUpload = true
+        }
+        Button("Download from URL", systemImage: "arrow.down.circle") {
+            showURLDownload = true
+        }
+        Button("Scan App Folder & Inbox", systemImage: "tray.and.arrow.down") {
+            appState.scanDropzones(silentIfEmpty: false)
+        }
+    }
+
     private var emptyLibraryView: some View {
         ContentUnavailableView {
             Label("No Visual Novels", systemImage: "book.closed")
         } description: {
-            Text("Import a Ren'Py .zip, .apk, .tar.gz, or folder, or drop a game folder into Files > On My iPhone > RenPlay > Games.")
+            Text("Import a Ren'Py .zip, .apk, .tar.gz, or folder, use Wi-Fi Browser Upload, or drop files into Files > On My iPhone > RenPlay.")
         } actions: {
-            Button("Import Game") {
-                showFileImporter = true
+            Menu("Import Game") {
+                importMenuItems
             }
             .buttonStyle(.borderedProminent)
 

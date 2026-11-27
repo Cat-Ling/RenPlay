@@ -10,11 +10,28 @@
 extern "C" {
 #endif
 
+enum {
+    RENPLAY_CMD_NONE = 0,
+    RENPLAY_CMD_GAME_MENU = 1,
+    RENPLAY_CMD_ROLLBACK = 2,
+    RENPLAY_CMD_TOGGLE_SKIP = 3,
+    RENPLAY_CMD_AUTO_FORWARD = 4,
+    RENPLAY_CMD_HIDE_UI = 5,
+    RENPLAY_CMD_SCREENSHOT = 6,
+    RENPLAY_CMD_QUICK_SAVE = 7,
+    RENPLAY_CMD_QUICK_LOAD = 8,
+    RENPLAY_CMD_TOGGLE_KEYBOARD = 9,
+    RENPLAY_CMD_QUIT = 10
+};
+
 // Swizzles UIWindow presentation so SDL2/SDL3 windows automatically bind to the active UIWindowScene.
 void renplay_install_sdl_scene_bridge(void);
 
 // Captures the active foreground UIWindowScene before hiding launcher windows.
 void renplay_capture_window_scene(void);
+
+// Enqueues an in-game command for Ren'Py's periodic callback (and triggers a detached _exit(0) watchdog on QUIT).
+void renplay_request_command(int command);
 
 // Redirects stdout/stderr to <logDir>/renplay_session.log, loads the Ren'Py framework via dlopen,
 // configures RENPY_* environment variables, and launches the engine.

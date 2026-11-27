@@ -5,6 +5,8 @@
 
 #ifdef __APPLE__
 
+#define GLES_SILENCE_DEPRECATION 1
+
 @import UIKit;
 @import Foundation;
 @import AVFoundation;
@@ -14,7 +16,9 @@
 #include <execinfo.h>
 #include <fcntl.h>
 #include <objc/runtime.h>
+#include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,12 +27,20 @@
 
 extern const unsigned char *glGetString(unsigned int name);
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+// Keep a file-scope reference into MetalANGLE so the linker cannot strip it as unused.
+const void * volatile renplay_ma_symbol_anchor = (const void *)&glGetString;
+#pragma clang diagnostic pop
+
 static void *g_active_handle = NULL;
 static int g_active_sdl_version = 2;
 static char g_log_file_path[2048] = {0};
 static char g_loaded_framework[2048] = {0};
 static int g_text_input_active = 0;
 static __weak UIWindowScene *g_target_window_scene = nil;
+static atomic_int g_pending_command = 0;
+static atomic_int g_quit_in_progress = 0;
 
 static UIWindowScene *renplay_find_foreground_scene(void) {
     UISceneActivationState states[] = {
@@ -460,6 +472,16 @@ static UIViewController *renplay_find_presenter(UIWindow *window) {
 + (void)requestAgeRange {}
 @end
 
+@interface RenPlayRuntimeBridge : NSObject
++ (int)consumeCommand;
+@end
+
+@implementation RenPlayRuntimeBridge
++ (int)consumeCommand {
+    return atomic_exchange(&g_pending_command, 0);
+}
+@end
+
 static void renplay_uncaught_exception_handler(NSException *exception) {
     NSLog(@"[RenPlay-CRASH] Uncaught ObjC exception: %@: %@\n%@",
           exception.name, exception.reason, exception.callStackSymbols);
@@ -507,9 +529,7 @@ static void renplay_install_crash_handlers(void) {
 void renplay_install_sdl_scene_bridge(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        // Keep a direct symbol reference into MetalANGLE so ld64 does not strip it as unused.
-        volatile const void *maAnchor = (const void *)&glGetString;
-        (void)maAnchor;
+        (void)renplay_ma_symbol_anchor;
         renplay_install_crash_handlers();
         Class cls = [UIWindow class];
         Method m1 = class_getInstanceMethod(cls, @selector(makeKeyAndVisible));
@@ -662,6 +682,8 @@ int renplay_launch_engine(
 
     g_active_handle = handle;
     g_active_sdl_version = sdlVersionHint;
+    atomic_store(&g_pending_command, 0);
+    atomic_store(&g_quit_in_progress, 0);
 
     // librenpython resolves <dirname(argv[0])>/base/main.py and /base/lib/pythonX.Y.
     char argv0[2048];
@@ -686,19 +708,95 @@ int renplay_launch_engine(
     return rc;
 }
 
+static void renplay_focus_sdl_textfield_on_main(int show) {
+    Class sdlWinCls = NSClassFromString(@"SDL_uikitwindow");
+    if (sdlWinCls == Nil) {
+        return;
+    }
+    UIWindowScene *scene = renplay_resolve_target_scene();
+    if (!scene) {
+        return;
+    }
+    for (UIWindow *win in scene.windows) {
+        if (![win isKindOfClass:sdlWinCls] || win.hidden) {
+            continue;
+        }
+        UIView *rootView = win.rootViewController.view;
+        for (UIView *subview in rootView.subviews) {
+            if ([subview isKindOfClass:UITextField.class]) {
+                if (show) {
+                    [subview becomeFirstResponder];
+                } else {
+                    [subview resignFirstResponder];
+                }
+                return;
+            }
+            for (UIView *child in subview.subviews) {
+                if ([child isKindOfClass:UITextField.class]) {
+                    if (show) {
+                        [child becomeFirstResponder];
+                    } else {
+                        [child resignFirstResponder];
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}
+
+static void renplay_focus_sdl_textfield(int show) {
+    if ([NSThread isMainThread]) {
+        renplay_focus_sdl_textfield_on_main(show);
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            renplay_focus_sdl_textfield_on_main(show);
+        });
+    }
+}
+
+static void *renplay_quit_watchdog(void *arg) {
+    (void)arg;
+    usleep(300000);
+    fflush(NULL);
+    _exit(0);
+    return NULL;
+}
+
+void renplay_request_command(int command) {
+    if (command == RENPLAY_CMD_TOGGLE_KEYBOARD) {
+        g_text_input_active = !g_text_input_active;
+        atomic_store(&g_pending_command, RENPLAY_CMD_TOGGLE_KEYBOARD);
+        renplay_focus_sdl_textfield(g_text_input_active);
+        return;
+    }
+    if (command == RENPLAY_CMD_QUIT) {
+        atomic_store(&g_pending_command, RENPLAY_CMD_QUIT);
+        if (atomic_exchange(&g_quit_in_progress, 1) == 0) {
+            pthread_t thread;
+            pthread_attr_t attr;
+            if (pthread_attr_init(&attr) == 0) {
+                pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+                if (pthread_create(&thread, &attr, renplay_quit_watchdog, NULL) != 0) {
+                    fflush(NULL);
+                    _exit(0);
+                }
+                pthread_attr_destroy(&attr);
+            } else {
+                fflush(NULL);
+                _exit(0);
+            }
+        }
+        return;
+    }
+    atomic_store(&g_pending_command, command);
+}
+
 typedef int (*SDL2PushEventFn)(void *event);
 typedef int (*SDL3PushEventFn)(void *event);
 
 void renplay_send_sdl_quit(void) {
-    if (!g_active_handle) return;
-    SDL2PushEventFn pushFn = (SDL2PushEventFn)dlsym(g_active_handle, "SDL_PushEvent");
-    if (!pushFn) return;
-
-    uint8_t eventBuf[128];
-    memset(eventBuf, 0, sizeof(eventBuf));
-    uint32_t eventType = 0x100; // SDL_QUIT in both SDL2 and SDL3
-    memcpy(eventBuf, &eventType, sizeof(eventType));
-    pushFn(eventBuf);
+    renplay_request_command(RENPLAY_CMD_QUIT);
 }
 
 void renplay_send_key_press(int sdlKeycode, int sdlScancode) {
@@ -708,7 +806,6 @@ void renplay_send_key_press(int sdlKeycode, int sdlScancode) {
 
     uint8_t ev[128];
     if (g_active_sdl_version >= 3) {
-        // SDL3 SDL_KeyboardEvent: type(u32 @0), reserved(u32 @4), timestamp(u64 @8), windowID(u32 @16), which(u32 @20), scancode(u32 @24), key(u32 @28), mod(u16 @32), raw(u16 @34), down(u8 @36), repeat(u8 @37)
         uint32_t downType = 0x300;
         uint32_t upType = 0x301;
         uint32_t sc = (uint32_t)sdlScancode;
@@ -728,7 +825,6 @@ void renplay_send_key_press(int sdlKeycode, int sdlScancode) {
         ev[36] = 0;
         pushFn(ev);
     } else {
-        // SDL2 SDL_KeyboardEvent: type(u32 @0), timestamp(u32 @4), windowID(u32 @8), state(u8 @12), repeat(u8 @13), scancode(u32 @16), sym(i32 @20)
         uint32_t downType = 0x300;
         uint32_t upType = 0x301;
         uint32_t sc = (uint32_t)sdlScancode;
@@ -736,14 +832,14 @@ void renplay_send_key_press(int sdlKeycode, int sdlScancode) {
 
         memset(ev, 0, sizeof(ev));
         memcpy(ev + 0, &downType, 4);
-        ev[12] = 1; // SDL_PRESSED
+        ev[12] = 1;
         memcpy(ev + 16, &sc, 4);
         memcpy(ev + 20, &sym, 4);
         pushFn(ev);
 
         memset(ev, 0, sizeof(ev));
         memcpy(ev + 0, &upType, 4);
-        ev[12] = 0; // SDL_RELEASED
+        ev[12] = 0;
         memcpy(ev + 16, &sc, 4);
         memcpy(ev + 20, &sym, 4);
         pushFn(ev);
@@ -751,40 +847,14 @@ void renplay_send_key_press(int sdlKeycode, int sdlScancode) {
 }
 
 void renplay_toggle_text_input(void) {
-    if (!g_active_handle) return;
-    if (g_active_sdl_version >= 3) {
-        typedef int (*SDL3TextFn)(void *);
-        typedef void *(*SDL3GetFocusFn)(void);
-        SDL3GetFocusFn getFocus = (SDL3GetFocusFn)dlsym(g_active_handle, "SDL_GetKeyboardFocus");
-        void *win = getFocus ? getFocus() : NULL;
-        if (!win) return;
-        if (g_text_input_active) {
-            SDL3TextFn stopFn = (SDL3TextFn)dlsym(g_active_handle, "SDL_StopTextInput");
-            if (stopFn) stopFn(win);
-            g_text_input_active = 0;
-        } else {
-            SDL3TextFn startFn = (SDL3TextFn)dlsym(g_active_handle, "SDL_StartTextInput");
-            if (startFn) startFn(win);
-            g_text_input_active = 1;
-        }
-    } else {
-        typedef void (*SDL2VoidFn)(void);
-        if (g_text_input_active) {
-            SDL2VoidFn stopFn = (SDL2VoidFn)dlsym(g_active_handle, "SDL_StopTextInput");
-            if (stopFn) stopFn();
-            g_text_input_active = 0;
-        } else {
-            SDL2VoidFn startFn = (SDL2VoidFn)dlsym(g_active_handle, "SDL_StartTextInput");
-            if (startFn) startFn();
-            g_text_input_active = 1;
-        }
-    }
+    renplay_request_command(RENPLAY_CMD_TOGGLE_KEYBOARD);
 }
 
 #else
 
 void renplay_install_sdl_scene_bridge(void) {}
 void renplay_capture_window_scene(void) {}
+void renplay_request_command(int command) { (void)command; }
 
 int renplay_launch_engine(
     const char *frameworkPath,

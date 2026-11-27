@@ -9,6 +9,7 @@ struct SettingsView: View {
     @Bindable var appState: AppState
     @State private var cacheSizeBytes: Int64 = 0
     @State private var showLicenseSheet = false
+    @State private var copiedDocsPath = false
 
     var body: some View {
         NavigationStack {
@@ -77,6 +78,26 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("Storage")
+                }
+
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Documents Folder")
+                            .font(.subheadline)
+                        Text(appState.documentsDir.path)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    Button(copiedDocsPath ? "Copied Sandbox Documents Path" : "Copy Sandbox Documents Path") {
+                        UIPasteboard.general.string = appState.documentsDir.path
+                        copiedDocsPath = true
+                    }
+                    Button("Scan App Folder & Inbox") {
+                        appState.scanDropzones(silentIfEmpty: false)
+                    }
+                } header: {
+                    Text("Sideloading & File Access")
                 }
 
                 Section {

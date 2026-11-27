@@ -48,7 +48,7 @@ struct GameSaveManagerView: View {
 
     @State private var slots: [SaveSlot] = []
     @State private var backups: [BackupEntry] = []
-    @State private var showSaveImporter = false
+    @State private var savePickerMode: SideloadPickerMode?
     @State private var exportedZipURL: URL?
     @State private var statusBanner: String?
 
@@ -132,6 +132,19 @@ struct GameSaveManagerView: View {
                     }
                 }
 
+                if !slots.isEmpty {
+                    Button("Export Saves to App Folder", systemImage: "folder.badge.plus") {
+                        do {
+                            appState.libraryStore.ensureDirectories()
+                            let dst = appState.libraryStore.exportsDir.appendingPathComponent("\(game.folderName)-saves.zip")
+                            try appState.saveManager.exportSavesZip(from: saveDir, to: dst)
+                            statusBanner = "Exported to Files > RenPlay > Exports > \(dst.lastPathComponent)"
+                        } catch {
+                            statusBanner = "Export failed: \(error.localizedDescription)"
+                        }
+                    }
+                }
+
                 ForEach(backups) { backup in
                     HStack {
                         VStack(alignment: .leading) {
@@ -161,8 +174,13 @@ struct GameSaveManagerView: View {
         .navigationTitle("Saves")
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Button("Import", systemImage: "square.and.arrow.down") {
-                    showSaveImporter = true
+                Menu("Import", systemImage: "square.and.arrow.down") {
+                    Button("Import Save / ZIP (Copy Mode)", systemImage: "doc") {
+                        savePickerMode = .archiveCopy
+                    }
+                    Button("Import Save / ZIP (In-Place / LiveContainer)", systemImage: "externaldrive") {
+                        savePickerMode = .archiveInPlace
+                    }
                 }
                 if let exportedZipURL {
                     ShareLink(item: exportedZipURL) {
@@ -171,23 +189,36 @@ struct GameSaveManagerView: View {
                 }
             }
         }
-        .fileImporter(
-            isPresented: $showSaveImporter,
-            allowedContentTypes: [.zip, UTType(filenameExtension: "save") ?? .data],
-            allowsMultipleSelection: true
-        ) { result in
-            if case .success(let urls) = result {
-                var total = 0
-                for url in urls {
-                    let ok = url.startAccessingSecurityScopedResource()
-                    defer { if ok { url.stopAccessingSecurityScopedResource() } }
-                    if let n = try? appState.saveManager.importSaves(from: url, into: saveDir, backupDir: backupDir) {
-                        total += n
+        .sheet(item: $savePickerMode) { mode in
+            SideloadDocumentPicker(
+                mode: mode,
+                onPick: { items in
+                    savePickerMode = nil
+                    var total = 0
+                    var lastErr: String?
+                    for item in items {
+                        defer {
+                            item.stopSecurityScope?()
+                            if item.deleteAfterImport {
+                                try? FileManager.default.removeItem(at: item.url)
+                            }
+                        }
+                        do {
+                            total += try appState.saveManager.importSaves(from: item.url, into: saveDir, backupDir: backupDir)
+                        } catch {
+                            lastErr = error.localizedDescription
+                        }
                     }
+                    statusBanner = total > 0
+                        ? "Imported \(total) save file(s)."
+                        : (lastErr ?? "No valid .save or persistent files selected.")
+                    reload()
+                },
+                onError: { msg in
+                    savePickerMode = nil
+                    statusBanner = msg
                 }
-                statusBanner = "Imported \(total) save file(s)."
-                reload()
-            }
+            )
         }
         .onAppear { reload() }
     }

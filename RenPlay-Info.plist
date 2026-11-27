@@ -16,8 +16,8 @@
     <true/>
     <key>UIFileSharingEnabled</key>
     <true/>
-    <key>UISupportsDocumentBrowser</key>
-    <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>RenPlay uses your local Wi-Fi network when you start Wi-Fi Browser Upload to transfer games and saves from another device.</string>
     <key>UIStatusBarHidden</key>
     <true/>
     <key>UIApplicationSupportsIndirectInputEvents</key>
@@ -47,8 +47,11 @@
             <key>LSItemContentTypes</key>
             <array>
                 <string>public.zip-archive</string>
+                <string>public.archive</string>
                 <string>org.gnu.gnu-tar-archive</string>
+                <string>org.gnu.gnu-zip-archive</string>
                 <string>com.android.package-archive</string>
+                <string>public.data</string>
             </array>
         </dict>
     </array>

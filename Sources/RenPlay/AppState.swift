@@ -9,6 +9,7 @@ import RenPlayCore
 @MainActor
 @Observable
 public final class AppState {
+    public let documentsDir: URL
     public let libraryStore: LibraryStore
     public let saveManager = SaveManager()
     public let launcher: EngineLauncher
@@ -28,6 +29,8 @@ public final class AppState {
             ?? FileManager.default.temporaryDirectory
         let root = docs.appendingPathComponent("RenPlay", isDirectory: true)
         let store = LibraryStore(rootDir: root)
+        store.seedVisibleDocumentsFolderIfNeeded(documentsDir: docs)
+        self.documentsDir = docs
         self.libraryStore = store
         self.appSettings = store.loadSettings()
         self.launcher = EngineLauncher(libraryStore: store, saveManager: SaveManager())
@@ -89,44 +92,135 @@ public final class AppState {
         }
     }
 
-    public func importFiles(_ urls: [URL]) {
-        guard !urls.isEmpty else { return }
+    public func importFiles(_ urls: [URL], deleteSourceAfterImport: Bool = false) {
+        let items: [PickedImportItem] = urls.map { url in
+            let accessed = url.startAccessingSecurityScopedResource()
+            let cleanup: (@Sendable () -> Void)?
+            if accessed {
+                cleanup = { url.stopAccessingSecurityScopedResource() }
+            } else {
+                cleanup = nil
+            }
+            return PickedImportItem(url: url, deleteAfterImport: deleteSourceAfterImport, stopSecurityScope: cleanup)
+        }
+        importPickedItems(items)
+    }
+
+    public func importPickedItems(_ items: [PickedImportItem]) {
+        guard !items.isEmpty else { return }
         isImporting = true
         importProgress = 0
         importStatus = "Preparing import..."
+        let store = libraryStore
 
         Task {
-            defer {
+            var errors: [String] = []
+            for item in items {
+                do {
+                    let entry: GameEntry = try await Task.detached(priority: .userInitiated) {
+                        defer {
+                            item.stopSecurityScope?()
+                            if item.deleteAfterImport {
+                                try? FileManager.default.removeItem(at: item.url)
+                            }
+                        }
+                        let fm = FileManager.default
+                        var isDir: ObjCBool = false
+                        fm.fileExists(atPath: item.url.path, isDirectory: &isDir)
+                        if isDir.boolValue {
+                            await MainActor.run {
+                                self.importStatus = "Copying \(item.url.lastPathComponent)..."
+                            }
+                            return try store.importGameFolder(from: item.url)
+                        } else {
+                            return try store.importGameArchive(from: item.url) { frac, name in
+                                Task { @MainActor in
+                                    self.importProgress = frac
+                                    self.importStatus = name
+                                }
+                            }
+                        }
+                    }.value
+                    games.append(entry)
+                } catch {
+                    errors.append("\(item.url.lastPathComponent): \(error.localizedDescription)")
+                }
+            }
+            isImporting = false
+            importProgress = 0
+            importStatus = ""
+            if !errors.isEmpty {
+                activeError = "Import failed for \(errors.joined(separator: "; "))"
+            }
+        }
+    }
+
+    public func scanDropzones(silentIfEmpty: Bool = true) {
+        guard !isImporting && !isLaunching else { return }
+        let store = libraryStore
+        let extraDirs = [
+            documentsDir,
+            documentsDir.appendingPathComponent("Inbox", isDirectory: true),
+            documentsDir.appendingPathComponent("Import", isDirectory: true),
+        ]
+        if !silentIfEmpty {
+            isImporting = true
+            importProgress = 0
+            importStatus = "Scanning RenPlay folders..."
+        }
+        Task {
+            do {
+                let count = try await Task.detached(priority: .userInitiated) {
+                    try store.scanAndImportDropzones(additionalDirs: extraDirs) { frac, name in
+                        Task { @MainActor in
+                            self.importProgress = frac
+                            self.importStatus = name
+                        }
+                    }
+                }.value
                 isImporting = false
                 importProgress = 0
                 importStatus = ""
+                refreshLibrary()
+                if !silentIfEmpty && count == 0 {
+                    activeError = "No new archives or Ren'Py folders found in Documents, Inbox, or Import."
+                }
+            } catch {
+                isImporting = false
+                importProgress = 0
+                importStatus = ""
+                activeError = "Folder scan failed: \(error.localizedDescription)"
             }
-            for url in urls {
-                let accessed = url.startAccessingSecurityScopedResource()
-                defer {
-                    if accessed { url.stopAccessingSecurityScopedResource() }
-                }
-                do {
-                    var isDir: ObjCBool = false
-                    FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-                    let entry: GameEntry
-                    if isDir.boolValue {
-                        await MainActor.run {
-                            self.importStatus = "Copying \(url.lastPathComponent)..."
-                        }
-                        entry = try libraryStore.importGameFolder(from: url)
-                    } else {
-                        entry = try libraryStore.importGameArchive(from: url) { frac, name in
-                            Task { @MainActor in
-                                self.importProgress = frac
-                                self.importStatus = name
-                            }
-                        }
-                    }
-                    games.append(entry)
-                } catch {
-                    activeError = "Import failed for \(url.lastPathComponent): \(error.localizedDescription)"
-                }
+        }
+    }
+
+    public func downloadAndImport(urlString: String) {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            activeError = "Enter a valid http:// or https:// archive URL."
+            return
+        }
+        isImporting = true
+        importProgress = 0
+        importStatus = "Downloading \(url.lastPathComponent)..."
+
+        Task {
+            do {
+                let (tmpURL, response) = try await URLSession.shared.download(from: url)
+                let suggested = (response as? HTTPURLResponse)?.suggestedFilename
+                    ?? (url.lastPathComponent.isEmpty ? "downloaded-game.zip" : url.lastPathComponent)
+                let staged = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("renplay-dl-\(UUID().uuidString)-\(suggested)")
+                try? FileManager.default.removeItem(at: staged)
+                try FileManager.default.moveItem(at: tmpURL, to: staged)
+                importPickedItems([PickedImportItem(url: staged, deleteAfterImport: true)])
+            } catch {
+                isImporting = false
+                importProgress = 0
+                importStatus = ""
+                activeError = "Download failed: \(error.localizedDescription)"
             }
         }
     }

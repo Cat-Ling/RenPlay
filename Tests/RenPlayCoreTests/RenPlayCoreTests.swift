@@ -229,4 +229,40 @@ struct SaveAndLibraryTests {
         #expect(backup != nil)
         #expect(sm.listBackups(in: backupDir).count == 1)
     }
+
+    @Test("Seeds visible Documents folder and auto-imports dropzone archives and folders")
+    func dropzoneScanAndImport() throws {
+        let docsDir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: docsDir) }
+
+        let store = LibraryStore(rootDir: docsDir.appendingPathComponent("RenPlay", isDirectory: true))
+        store.seedVisibleDocumentsFolderIfNeeded(documentsDir: docsDir)
+        #expect(FileManager.default.fileExists(atPath: docsDir.appendingPathComponent("HOW_TO_IMPORT.txt").path))
+
+        let inboxDir = docsDir.appendingPathComponent("Inbox", isDirectory: true)
+        try FileManager.default.createDirectory(at: inboxDir, withIntermediateDirectories: true)
+        let zipDrop = inboxDir.appendingPathComponent("DropArchive.zip")
+        try ArchiveExtractor.createZip(
+            fromFiles: [
+                ("game/script.rpy", Data("label start:\n    \"Hi\"\n".utf8)),
+                ("script_version.txt", Data("8.3.7\n".utf8)),
+            ],
+            to: zipDrop
+        )
+
+        let folderDrop = store.importDropzoneDir.appendingPathComponent("DropFolder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folderDrop.appendingPathComponent("game", isDirectory: true), withIntermediateDirectories: true)
+        try Data("label start:\n    \"Hi\"\n".utf8).write(to: folderDrop.appendingPathComponent("game/script.rpy"))
+        try "8.5.3\n".write(to: folderDrop.appendingPathComponent("script_version.txt"), atomically: true, encoding: .utf8)
+
+        let count = try store.scanAndImportDropzones(additionalDirs: [docsDir, inboxDir])
+        #expect(count == 2)
+        #expect(!FileManager.default.fileExists(atPath: zipDrop.path))
+        #expect(!FileManager.default.fileExists(atPath: folderDrop.path))
+
+        let games = try store.syncWithDisk()
+        #expect(games.count == 2)
+        #expect(games.contains(where: { $0.displayName == "DropArchive" && $0.detectedEngineVersion == "8.3.7" }))
+        #expect(games.contains(where: { $0.displayName == "DropFolder" && $0.detectedEngineVersion == "8.5.3" }))
+    }
 }

@@ -9,6 +9,8 @@ public final class LibraryStore: @unchecked Sendable {
     public let savesDir: URL
     public let backupsDir: URL
     public let logsDir: URL
+    public let importDropzoneDir: URL
+    public let exportsDir: URL
     private let libraryFileURL: URL
     private let settingsFileURL: URL
 
@@ -31,6 +33,8 @@ public final class LibraryStore: @unchecked Sendable {
         self.savesDir = rootDir.appendingPathComponent("Saves", isDirectory: true)
         self.backupsDir = rootDir.appendingPathComponent("Backups", isDirectory: true)
         self.logsDir = rootDir.appendingPathComponent("Logs", isDirectory: true)
+        self.importDropzoneDir = rootDir.appendingPathComponent("Import", isDirectory: true)
+        self.exportsDir = rootDir.appendingPathComponent("Exports", isDirectory: true)
         self.libraryFileURL = rootDir.appendingPathComponent("library.json")
         self.settingsFileURL = rootDir.appendingPathComponent("settings.json")
         ensureDirectories()
@@ -38,8 +42,29 @@ public final class LibraryStore: @unchecked Sendable {
 
     public func ensureDirectories() {
         let fm = FileManager.default
-        for dir in [rootDir, gamesDir, savesDir, backupsDir, logsDir] {
+        for dir in [rootDir, gamesDir, savesDir, backupsDir, logsDir, importDropzoneDir, exportsDir] {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+    }
+
+    // Create a visible folder and readme under Documents so iOS Files exposes RenPlay immediately.
+    public func seedVisibleDocumentsFolderIfNeeded(documentsDir: URL) {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: documentsDir.appendingPathComponent("Import", isDirectory: true), withIntermediateDirectories: true)
+        let readmeURL = documentsDir.appendingPathComponent("HOW_TO_IMPORT.txt")
+        if !fm.fileExists(atPath: readmeURL.path) {
+            let instructions = """
+            RenPlay Import & File Access
+            ----------------------------
+            Drop .zip, .apk, .tar, .tar.gz archives or unpacked Ren'Py game folders into:
+            - Documents/Import/
+            - Documents/ (this folder)
+            - Documents/RenPlay/Import/
+
+            Then return to RenPlay or tap Import > Scan App Folder & Inbox.
+            Exported save archives are saved under Documents/RenPlay/Exports/.
+            """
+            try? instructions.write(to: readmeURL, atomically: true, encoding: .utf8)
         }
     }
 
@@ -155,13 +180,12 @@ public final class LibraryStore: @unchecked Sendable {
 
     public func importGameFolder(from sourceFolder: URL) throws -> GameEntry {
         ensureDirectories()
-        let fm = FileManager.default
         let rawTitle = sourceFolder.lastPathComponent
         let folderName = uniqueFolderName(base: sanitizeFolderName(rawTitle))
         let finalDir = gamesDir.appendingPathComponent(folderName, isDirectory: true)
 
         let gameRoot = ArchiveExtractor.locateGameRoot(inside: sourceFolder)
-        try fm.copyItem(at: gameRoot, to: finalDir)
+        try copyDirectoryResilient(from: gameRoot, to: finalDir)
 
         let detected = RenPyVersionDetector.detectVersion(in: finalDir)
         let cover = extractCoverIfNeeded(in: finalDir)
@@ -176,6 +200,127 @@ public final class LibraryStore: @unchecked Sendable {
         games.append(entry)
         try saveGames(games)
         return entry
+    }
+
+    // Fallback to byte-by-byte file copies when FileManager.copyItem fails across FileProvider/container boundaries.
+    private func copyDirectoryResilient(from src: URL, to dst: URL) throws {
+        let fm = FileManager.default
+        do {
+            try fm.copyItem(at: src, to: dst)
+            return
+        } catch {
+            try? fm.removeItem(at: dst)
+            try fm.createDirectory(at: dst, withIntermediateDirectories: true)
+            guard let enumerator = fm.enumerator(
+                at: src,
+                includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                throw error
+            }
+            let basePath = src.standardizedFileURL.path
+            while let item = enumerator.nextObject() as? URL {
+                let itemPath = item.standardizedFileURL.path
+                guard itemPath.hasPrefix(basePath) else { continue }
+                let rel = String(itemPath.dropFirst(basePath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                guard !rel.isEmpty else { continue }
+                let target = dst.appendingPathComponent(rel)
+                let vals = try item.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+                if vals.isDirectory == true {
+                    try fm.createDirectory(at: target, withIntermediateDirectories: true)
+                } else {
+                    try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    let data = try Data(contentsOf: item, options: .mappedIfSafe)
+                    try data.write(to: target, options: .atomic)
+                }
+            }
+        }
+    }
+
+    public func scanAndImportDropzones(
+        additionalDirs: [URL] = [],
+        progress: (@Sendable (Double, String) -> Void)? = nil
+    ) throws -> Int {
+        ensureDirectories()
+        let fm = FileManager.default
+        let archiveExts: Set<String> = ["zip", "apk", "tar", "tgz", "gz"]
+        let reservedDirNames: Set<String> = ["renplay", "import", "exports", "inbox"]
+        var importedCount = 0
+
+        var seenPaths = Set<String>()
+        var searchDirs: [URL] = []
+        for dir in [importDropzoneDir] + additionalDirs {
+            let std = dir.standardizedFileURL.path
+            if !seenPaths.contains(std) && fm.fileExists(atPath: std) {
+                seenPaths.insert(std)
+                searchDirs.append(dir)
+            }
+        }
+
+        for dir in searchDirs {
+            let items = (try? fm.contentsOfDirectory(
+                at: dir,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            for item in items {
+                let name = item.lastPathComponent
+                if name == "HOW_TO_IMPORT.txt" { continue }
+                let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                if isDir {
+                    if reservedDirNames.contains(name.lowercased()) {
+                        continue
+                    }
+                    if looksLikeRenPyGameFolder(at: item) {
+                        _ = try importGameFolder(from: item)
+                        try? fm.removeItem(at: item)
+                        importedCount += 1
+                    }
+                } else if archiveExts.contains(item.pathExtension.lowercased()) {
+                    _ = try importGameArchive(from: item, progress: progress)
+                    try? fm.removeItem(at: item)
+                    importedCount += 1
+                }
+            }
+        }
+
+        let gameTopItems = (try? fm.contentsOfDirectory(
+            at: gamesDir,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        for item in gameTopItems {
+            let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            if !isDir && archiveExts.contains(item.pathExtension.lowercased()) {
+                _ = try importGameArchive(from: item, progress: progress)
+                try? fm.removeItem(at: item)
+                importedCount += 1
+            }
+        }
+
+        _ = try syncWithDisk()
+        return importedCount
+    }
+
+    private func looksLikeRenPyGameFolder(at url: URL) -> Bool {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.appendingPathComponent("game").path)
+            || fm.fileExists(atPath: url.appendingPathComponent("renpy").path)
+            || fm.fileExists(atPath: url.appendingPathComponent("script_version.txt").path) {
+            return true
+        }
+        let children = (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+        for child in children {
+            let ext = child.pathExtension.lowercased()
+            if ext == "rpa" || ext == "rpy" || ext == "rpyc" {
+                return true
+            }
+            if (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+               fm.fileExists(atPath: child.appendingPathComponent("game").path) {
+                return true
+            }
+        }
+        return false
     }
 
     public func deleteGame(_ game: GameEntry, deleteSaves: Bool = true) throws {
