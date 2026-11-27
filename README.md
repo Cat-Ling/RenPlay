@@ -10,7 +10,7 @@
 | **[CRenPlayBridge](Sources/CRenPlayBridge)** | Objective-C/C bridge handling `dlopen` engine loading, `MetalANGLE` GLES-on-Metal preload, SDL2/SDL3 `UIWindowScene` swizzling, native keyboard input, multi-touch gesture recognizers, `AVPlayer` video hooks, and `PHPhotoLibrary` screenshot export. |
 | **[CSMB2](Sources/CSMB2)** | Vendored `libsmb2` client providing range-read (`renplay_smb_pread`) streaming over SMBv2/v3 LAN shares without downloading game assets ahead of time. |
 | **[RenPlay App](Sources/RenPlay)** | SwiftUI interface, game library, fullscreen asset gallery, Wi-Fi HTTP uploader, passthrough in-game HUD overlay, and privacy-scrubbed AI diagnostics export. |
-| **[Engine Packs](BundleResources/Engines/engines-manifest.json)** | Prebuilt `renpy7_8_7` (Py 2.7/SDL2), `renpy8_3_7` (Py 3.9/SDL2), `renpy8_4_1` (Py 3.12/SDL2), `renpy8_5_3` (Py 3.12/SDL2), and `renpy8_6_1` (Py 3.12/SDL3). |
+| **[Engine Packs](scripts/fetch_engines.sh)** | Prebuilt `renpy7_8_7` (Py 2.7/SDL2), `renpy8_3_7` (Py 3.9/SDL2), `renpy8_4_1` (Py 3.12/SDL2), `renpy8_5_3` (Py 3.12/SDL2), and `renpy8_6_1` (Py 3.12/SDL3). |
 
 ## Features
 
