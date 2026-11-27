@@ -98,6 +98,7 @@ public final class LibraryStore: @unchecked Sendable {
     public func seedVisibleDocumentsFolderIfNeeded(documentsDir: URL) {
         let fm = FileManager.default
         try? fm.createDirectory(at: documentsDir.appendingPathComponent("Import", isDirectory: true), withIntermediateDirectories: true)
+        try? fm.createDirectory(at: documentsDir.appendingPathComponent("Screenshots", isDirectory: true), withIntermediateDirectories: true)
         let readmeURL = documentsDir.appendingPathComponent("HOW_TO_IMPORT.txt")
         if !fm.fileExists(atPath: readmeURL.path) {
             let instructions = """
@@ -108,10 +109,26 @@ public final class LibraryStore: @unchecked Sendable {
             - Documents/ (this folder)
             - Documents/RenPlay/Import/
 
-            Then return to RenPlay or tap Import > Scan App Folder & Inbox.
+            Then return to RenPlay or tap Import > Scan Import Folder.
+            Screenshots saved to Documents are stored in Documents/Screenshots/.
             Exported save archives are saved under Documents/RenPlay/Exports/.
             """
             try? instructions.write(to: readmeURL, atomically: true, encoding: .utf8)
+        }
+    }
+
+    public func screenshotDirectory(for game: GameEntry, documentsDir: URL) -> URL {
+        documentsDir
+            .appendingPathComponent("Screenshots", isDirectory: true)
+            .appendingPathComponent(game.folderName, isDirectory: true)
+    }
+
+    public func clearScreenshots(in documentsDir: URL) throws {
+        let screenshotsRoot = documentsDir.appendingPathComponent("Screenshots", isDirectory: true)
+        let fm = FileManager.default
+        let items = (try? fm.contentsOfDirectory(at: screenshotsRoot, includingPropertiesForKeys: nil)) ?? []
+        for item in items {
+            try? fm.removeItem(at: item)
         }
     }
 
@@ -489,7 +506,7 @@ public final class LibraryStore: @unchecked Sendable {
     ) throws -> Int {
         ensureDirectories()
         let fm = FileManager.default
-        let reservedDirNames: Set<String> = ["renplay", "import", "exports", "inbox"]
+        let reservedDirNames: Set<String> = ["renplay", "import", "exports", "inbox", "screenshots"]
         var importedCount = 0
 
         var seenPaths = Set<String>()
@@ -877,7 +894,7 @@ public final class LibraryStore: @unchecked Sendable {
         return updated
     }
 
-    public func computeStorageBreakdown(engineCacheBytes: Int64) -> StorageBreakdown {
+    public func computeStorageBreakdown(engineCacheBytes: Int64, documentsDir: URL? = nil) -> StorageBreakdown {
         let games = loadGames()
         var usages: [StorageBreakdown.GameUsage] = []
         var gamesTotal: Int64 = 0
@@ -892,13 +909,16 @@ public final class LibraryStore: @unchecked Sendable {
             ))
         }
         usages.sort { $0.bytes > $1.bytes }
+        let screenshotsRoot = (documentsDir ?? rootDir.deletingLastPathComponent())
+            .appendingPathComponent("Screenshots", isDirectory: true)
         return StorageBreakdown(
             games: usages,
             totalGamesBytes: gamesTotal,
             savesBytes: directoryFileBytes(savesDir),
             backupsBytes: directoryFileBytes(backupsDir),
             exportsBytes: directoryFileBytes(exportsDir),
-            engineCacheBytes: engineCacheBytes
+            engineCacheBytes: engineCacheBytes,
+            screenshotsBytes: directoryFileBytes(screenshotsRoot)
         )
     }
 

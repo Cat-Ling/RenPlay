@@ -11,6 +11,7 @@
 @import UIKit;
 @import Foundation;
 @import AVFoundation;
+@import Photos;
 @import StoreKit;
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -51,6 +52,7 @@ static atomic_int g_kbd_user_hidden = 0;
 static atomic_int g_kbd_manual_open = 0;
 static int g_programmatic_hide = 0;
 static atomic_int g_preferred_orientation = 0;
+static atomic_int g_screenshot_dest_mode = 0;
 static atomic_int g_dialogue_seen = 0;
 static atomic_int g_dialogue_total = 0;
 
@@ -1015,6 +1017,8 @@ static const void * volatile g_renplay_symbol_anchors[] = {
     (const void *)&renplay_bridge_consume_mouse_event,
     (const void *)&renplay_bridge_consume_rpc,
     (const void *)&renplay_bridge_post_rpc_reply,
+    (const void *)&renplay_bridge_get_screenshot_mode,
+    (const void *)&renplay_bridge_on_screenshot_saved,
 };
 
 void renplay_install_sdl_scene_bridge(void) {
@@ -1083,6 +1087,8 @@ int renplay_launch_engine(
     const char *multipersistentDir,
     const char *variant,
     const char *autoloadSaveSlot,
+    const char *screenshotDir,
+    int screenshotDestMode,
     int sdlVersionHint,
     int allowNetwork,
     int devMode,
@@ -1126,6 +1132,15 @@ int renplay_launch_engine(
         setenv("RENPY_AUTO_LOAD", autoloadSaveSlot, 1);
     } else {
         unsetenv("RENPY_AUTO_LOAD");
+    }
+    atomic_store(&g_screenshot_dest_mode, screenshotDestMode);
+    if (screenshotDir && screenshotDir[0] != '\0') {
+        NSString *rawDir = [NSString stringWithUTF8String:screenshotDir];
+        NSString *escaped = [rawDir stringByReplacingOccurrencesOfString:@"%" withString:@"%%"];
+        NSString *pattern = [escaped stringByAppendingPathComponent:@"screenshot%04d.png"];
+        setenv("RENPY_SCREENSHOT_PATTERN", pattern.UTF8String, 1);
+    } else {
+        unsetenv("RENPY_SCREENSHOT_PATTERN");
     }
     setenv("RENPY_PLATFORM", "ios-arm64", 1);
     setenv("RENPY_ALLOW_NETWORK", allowNetwork ? "1" : "0", 1);
@@ -1587,6 +1602,55 @@ int renplay_poll_rpc_reply(char *buf, size_t bufSize) {
     return (int)strlen(buf);
 }
 
+void renplay_set_screenshot_destination(int mode) {
+    atomic_store(&g_screenshot_dest_mode, mode);
+}
+
+int renplay_get_screenshot_destination(void) {
+    return atomic_load(&g_screenshot_dest_mode);
+}
+
+__attribute__((visibility("default"), used))
+int renplay_bridge_get_screenshot_mode(void) {
+    return atomic_load(&g_screenshot_dest_mode);
+}
+
+__attribute__((visibility("default"), used))
+void renplay_bridge_on_screenshot_saved(const char *filePath, int deleteAfterSave) {
+    if (!filePath || filePath[0] == '\0') return;
+    NSString *nsPath = [NSString stringWithUTF8String:filePath];
+    if (!nsPath) return;
+
+    NSData *pngData = [NSData dataWithContentsOfFile:nsPath];
+    if (deleteAfterSave != 0) {
+        [[NSFileManager defaultManager] removeItemAtPath:nsPath error:nil];
+        NSString *parentDir = [nsPath stringByDeletingLastPathComponent];
+        NSArray<NSString *> *remaining = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:parentDir error:nil];
+        if (remaining != nil && remaining.count == 0) {
+            [[NSFileManager defaultManager] removeItemAtPath:parentDir error:nil];
+        }
+    }
+    if (!pngData || pngData.length == 0) {
+        renplay_log_line("Screenshot save to Photos skipped: could not read %s", filePath);
+        return;
+    }
+
+    [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelAddOnly handler:^(PHAuthorizationStatus status) {
+        if (status != PHAuthorizationStatusAuthorized && status != PHAuthorizationStatusLimited) {
+            renplay_log_line("Photos save denied (authorization status=%ld)", (long)status);
+            return;
+        }
+        [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+            PHAssetCreationRequest *req = [PHAssetCreationRequest creationRequestForAsset];
+            [req addResourceWithType:PHAssetResourceTypePhoto data:pngData options:nil];
+        } completionHandler:^(BOOL success, NSError * _Nullable error) {
+            if (!success) {
+                renplay_log_line("Failed saving screenshot to Photos: %s", error.localizedDescription.UTF8String ?: "unknown error");
+            }
+        }];
+    }];
+}
+
 #else
 
 void renplay_install_sdl_scene_bridge(void) {}
@@ -1602,6 +1666,8 @@ int renplay_launch_engine(
     const char *multipersistentDir,
     const char *variant,
     const char *autoloadSaveSlot,
+    const char *screenshotDir,
+    int screenshotDestMode,
     int sdlVersionHint,
     int allowNetwork,
     int devMode,
@@ -1626,6 +1692,8 @@ int renplay_launch_engine(
     (void)multipersistentDir;
     (void)variant;
     (void)autoloadSaveSlot;
+    (void)screenshotDir;
+    (void)screenshotDestMode;
     (void)sdlVersionHint;
     (void)allowNetwork;
     (void)devMode;
@@ -1690,6 +1758,12 @@ int renplay_bridge_consume_rpc(char *buf, size_t bufSize) {
     return 0;
 }
 void renplay_bridge_post_rpc_reply(const char *jsonUTF8) { (void)jsonUTF8; }
+void renplay_set_screenshot_destination(int mode) { (void)mode; }
+int renplay_get_screenshot_destination(void) { return 0; }
+int renplay_bridge_get_screenshot_mode(void) { return 0; }
+void renplay_bridge_on_screenshot_saved(const char *filePath, int deleteAfterSave) {
+    (void)filePath; (void)deleteAfterSave;
+}
 
 #endif
 

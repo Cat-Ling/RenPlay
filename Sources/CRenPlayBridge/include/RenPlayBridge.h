@@ -47,6 +47,8 @@ int renplay_launch_engine(
     const char *multipersistentDir,
     const char *variant,
     const char *autoloadSaveSlot,
+    const char *screenshotDir,
+    int screenshotDestMode,
     int sdlVersionHint,
     int allowNetwork,
     int devMode,
@@ -67,6 +69,10 @@ int renplay_launch_engine(
 // Live orientation lock: 0=all, 1=landscapeLeft, 2=landscapeRight, 3=portrait, 4=landscapeBoth.
 void renplay_set_preferred_orientation(int mode);
 int renplay_get_preferred_orientation(void);
+
+// Screenshot destination mode: 0=Documents, 1=Photos, 2=Both.
+void renplay_set_screenshot_destination(int mode);
+int renplay_get_screenshot_destination(void);
 
 // Reads latest dialogue progress counters reported by Python.
 void renplay_get_dialogue_stats(int *seenOut, int *totalOut);
@@ -137,6 +143,8 @@ void renplay_bridge_report_stats(int seenBlocks, int totalBlocks);
 int renplay_bridge_consume_mouse_event(float *normX, float *normY, int *button, int *eventType);
 int renplay_bridge_consume_rpc(char *buf, size_t bufSize);
 void renplay_bridge_post_rpc_reply(const char *jsonUTF8);
+int renplay_bridge_get_screenshot_mode(void);
+void renplay_bridge_on_screenshot_saved(const char *filePath, int deleteAfterSave);
 
 #ifdef __cplusplus
 }

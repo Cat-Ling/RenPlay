@@ -491,6 +491,7 @@ struct SaveAndLibraryTests {
         let store = LibraryStore(rootDir: docsDir.appendingPathComponent("RenPlay", isDirectory: true))
         store.seedVisibleDocumentsFolderIfNeeded(documentsDir: docsDir)
         #expect(FileManager.default.fileExists(atPath: docsDir.appendingPathComponent("HOW_TO_IMPORT.txt").path))
+        #expect(FileManager.default.fileExists(atPath: docsDir.appendingPathComponent("Screenshots").path))
 
         let inboxDir = docsDir.appendingPathComponent("Inbox", isDirectory: true)
         try FileManager.default.createDirectory(at: inboxDir, withIntermediateDirectories: true)
@@ -820,9 +821,12 @@ struct SMBStreamingTests {
 
         var settings = AppSettings()
         #expect(settings.showQuickBar == false)
+        #expect(settings.screenshotDestination == .documents)
         settings.showQuickBar = true
+        settings.screenshotDestination = .photos
         let encoded = try JSONEncoder().encode(settings)
         let decoded = try JSONDecoder().decode(AppSettings.self, from: encoded)
         #expect(decoded.showQuickBar == true)
+        #expect(decoded.screenshotDestination == .photos)
     }
 }

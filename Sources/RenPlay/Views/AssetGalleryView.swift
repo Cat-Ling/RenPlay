@@ -94,6 +94,7 @@ private final class ThumbnailCache: @unchecked Sendable {
 
 struct AssetGalleryView: View {
     let gameDir: URL
+    var screenshotsDir: URL? = nil
     var remoteSource: SMBGameSource? = nil
     var remotePassword: String = ""
 
@@ -414,6 +415,7 @@ struct AssetGalleryView: View {
 
     private func scanAssets() async {
         let dir = gameDir
+        let shotsDir = screenshotsDir
         let smbSource = remoteSource
         let smbPass = remotePassword
         let found = await Task.detached(priority: .userInitiated) {
@@ -422,6 +424,19 @@ struct AssetGalleryView: View {
             let audioExts: Set<String> = ["mp3", "ogg", "wav", "m4a", "aac"]
             var collected: [AssetItem] = []
             let fm = FileManager.default
+
+            if let shotsDir,
+               let shotURLs = try? fm.contentsOfDirectory(at: shotsDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+                for url in shotURLs where imageExts.contains(url.pathExtension.lowercased()) {
+                    collected.append(AssetItem(
+                        id: "shot:\(url.path)",
+                        relativePath: "Screenshots/\(url.lastPathComponent)",
+                        kind: .image,
+                        source: .loose(url)
+                    ))
+                }
+            }
+
             let scanRoot = dir.appendingPathComponent("game")
             let targetDir = fm.fileExists(atPath: scanRoot.path) ? scanRoot : dir
             let basePrefix = targetDir.standardizedFileURL.path.hasSuffix("/")

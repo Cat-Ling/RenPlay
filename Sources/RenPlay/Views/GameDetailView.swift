@@ -260,6 +260,7 @@ struct GameDetailView: View {
             NavigationLink {
                 AssetGalleryView(
                     gameDir: appState.libraryStore.gameDirectory(for: game),
+                    screenshotsDir: appState.libraryStore.screenshotDirectory(for: game, documentsDir: appState.documentsDir),
                     remoteSource: game.remoteSource,
                     remotePassword: game.remoteSource.map { appState.libraryStore.smbPassword(for: $0.serverID) } ?? ""
                 )

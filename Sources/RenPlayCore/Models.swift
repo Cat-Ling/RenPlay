@@ -452,9 +452,10 @@ public struct StorageBreakdown: Sendable {
     public let backupsBytes: Int64
     public let exportsBytes: Int64
     public let engineCacheBytes: Int64
+    public let screenshotsBytes: Int64
 
     public var totalBytes: Int64 {
-        totalGamesBytes + savesBytes + backupsBytes + exportsBytes + engineCacheBytes
+        totalGamesBytes + savesBytes + backupsBytes + exportsBytes + engineCacheBytes + screenshotsBytes
     }
 
     public init(
@@ -463,7 +464,8 @@ public struct StorageBreakdown: Sendable {
         savesBytes: Int64,
         backupsBytes: Int64,
         exportsBytes: Int64,
-        engineCacheBytes: Int64
+        engineCacheBytes: Int64,
+        screenshotsBytes: Int64 = 0
     ) {
         self.games = games
         self.totalGamesBytes = totalGamesBytes
@@ -471,6 +473,7 @@ public struct StorageBreakdown: Sendable {
         self.backupsBytes = backupsBytes
         self.exportsBytes = exportsBytes
         self.engineCacheBytes = engineCacheBytes
+        self.screenshotsBytes = screenshotsBytes
     }
 }
 
@@ -546,6 +549,36 @@ public struct BackupEntry: Identifiable, Sendable, Hashable {
     }
 }
 
+public enum ScreenshotDestination: String, Codable, Sendable, CaseIterable {
+    case documents
+    case photos
+    case both
+
+    public var displayName: String {
+        switch self {
+        case .documents: return "Documents Folder"
+        case .photos: return "Photos App"
+        case .both: return "Documents & Photos"
+        }
+    }
+
+    public var bridgeMode: Int32 {
+        switch self {
+        case .documents: return 0
+        case .photos: return 1
+        case .both: return 2
+        }
+    }
+
+    public init(bridgeMode: Int32) {
+        switch bridgeMode {
+        case 1: self = .photos
+        case 2: self = .both
+        default: self = .documents
+        }
+    }
+}
+
 public struct AppSettings: Codable, Sendable, Equatable {
     public var defaultEngineStrategy: EngineSelectionStrategy
     public var autoBackupCount: Int
@@ -569,31 +602,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var showFPSOverlay: Bool
     public var showQuickBar: Bool
     public var virtualMouseSpeed: Double
-
-    private enum CodingKeys: String, CodingKey {
-        case defaultEngineStrategy
-        case autoBackupCount
-        case showOverlayByDefault
-        case overlayOpacity
-        case globalAllowNetwork
-        case libraryLayoutMode
-        case defaultRotation
-        case renpyMasterVolume
-        case globalDeveloperMode
-        case globalEnableConsole
-        case globalLowMemory
-        case globalLessUpdates
-        case globalForceRollback
-        case globalForceSkip
-        case globalForceUnseenSkip
-        case globalTransparentTextboxes
-        case globalCompatibilityPatches
-        case globalOverrideVariant
-        case globalSelectedVariants
-        case showFPSOverlay
-        case showQuickBar = "quickBarVisibleByDefault"
-        case virtualMouseSpeed
-    }
+    public var screenshotDestination: ScreenshotDestination
 
     public init(
         defaultEngineStrategy: EngineSelectionStrategy = .accurate,
@@ -617,7 +626,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
         globalSelectedVariants: [String] = [],
         showFPSOverlay: Bool = false,
         showQuickBar: Bool = false,
-        virtualMouseSpeed: Double = 1.0
+        virtualMouseSpeed: Double = 1.0,
+        screenshotDestination: ScreenshotDestination = .documents
     ) {
         self.defaultEngineStrategy = defaultEngineStrategy
         self.autoBackupCount = autoBackupCount
@@ -641,6 +651,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         self.showFPSOverlay = showFPSOverlay
         self.showQuickBar = showQuickBar
         self.virtualMouseSpeed = virtualMouseSpeed
+        self.screenshotDestination = screenshotDestination
     }
 
     public init(from decoder: Decoder) throws {
@@ -667,5 +678,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
         showFPSOverlay = try c.decodeIfPresent(Bool.self, forKey: .showFPSOverlay) ?? false
         showQuickBar = try c.decodeIfPresent(Bool.self, forKey: .showQuickBar) ?? false
         virtualMouseSpeed = try c.decodeIfPresent(Double.self, forKey: .virtualMouseSpeed) ?? 1.0
+        screenshotDestination = try c.decodeIfPresent(ScreenshotDestination.self, forKey: .screenshotDestination) ?? .documents
     }
 }

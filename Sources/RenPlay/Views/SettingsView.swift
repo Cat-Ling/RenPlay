@@ -48,6 +48,11 @@ struct SettingsView: View {
                             .font(.subheadline)
                         Slider(value: $appState.appSettings.virtualMouseSpeed, in: 0.4...2.5, step: 0.1)
                     }
+                    Picker("Save Screenshots To", selection: $appState.appSettings.screenshotDestination) {
+                        ForEach(ScreenshotDestination.allCases, id: \.self) { dest in
+                            Text(dest.displayName).tag(dest)
+                        }
+                    }
                     Stepper(
                         "Backups Kept: \(appState.appSettings.autoBackupCount)",
                         value: $appState.appSettings.autoBackupCount,
@@ -223,6 +228,7 @@ struct StorageManagerView: View {
                     usageRow(title: "Games", bytes: breakdown.totalGamesBytes)
                     usageRow(title: "Saves", bytes: breakdown.savesBytes)
                     usageRow(title: "Backups", bytes: breakdown.backupsBytes)
+                    usageRow(title: "Screenshots", bytes: breakdown.screenshotsBytes)
                     usageRow(title: "Exports", bytes: breakdown.exportsBytes)
                     usageRow(title: "Engine Cache", bytes: breakdown.engineCacheBytes)
                 }
@@ -259,6 +265,11 @@ struct StorageManagerView: View {
                         try? appState.launcher.clearEngineCache()
                         reload()
                     }
+                    Button("Clear Saved Screenshots", role: .destructive) {
+                        try? appState.libraryStore.clearScreenshots(in: appState.documentsDir)
+                        reload()
+                    }
+                    .disabled(breakdown.screenshotsBytes == 0)
                     Button("Clear Exported Archives", role: .destructive) {
                         try? appState.libraryStore.clearExports()
                         reload()
@@ -279,6 +290,7 @@ struct StorageManagerView: View {
             HStack(spacing: 2) {
                 barSlice(color: .blue, fraction: Double(b.totalGamesBytes) / Double(total), width: geo.size.width)
                 barSlice(color: .green, fraction: Double(b.savesBytes + b.backupsBytes) / Double(total), width: geo.size.width)
+                barSlice(color: .teal, fraction: Double(b.screenshotsBytes) / Double(total), width: geo.size.width)
                 barSlice(color: .orange, fraction: Double(b.engineCacheBytes) / Double(total), width: geo.size.width)
                 barSlice(color: .purple, fraction: Double(b.exportsBytes) / Double(total), width: geo.size.width)
             }
@@ -311,7 +323,10 @@ struct StorageManagerView: View {
 
     private func reload() {
         let cache = appState.launcher.engineCacheSizeBytes()
-        breakdown = appState.libraryStore.computeStorageBreakdown(engineCacheBytes: cache)
+        breakdown = appState.libraryStore.computeStorageBreakdown(
+            engineCacheBytes: cache,
+            documentsDir: appState.documentsDir
+        )
     }
 }
 #endif

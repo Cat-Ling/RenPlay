@@ -77,6 +77,7 @@ let package = Package(
                 .linkedFramework("UIKit", .when(platforms: [.iOS])),
                 .linkedFramework("Foundation", .when(platforms: [.iOS])),
                 .linkedFramework("AVFoundation", .when(platforms: [.iOS])),
+                .linkedFramework("Photos", .when(platforms: [.iOS])),
                 .linkedFramework("QuartzCore", .when(platforms: [.iOS])),
                 .linkedFramework("StoreKit", .when(platforms: [.iOS])),
             ]

@@ -105,9 +105,15 @@ public final class EngineLauncher {
         let backupDir = libraryStore.backupDirectory(for: game)
         let logDir = libraryStore.logDirectory(for: game)
         let multipersistentDir = libraryStore.multipersistentDir
+        let documentsDir = libraryStore.rootDir.deletingLastPathComponent()
+        let screenshotDir = libraryStore.screenshotDirectory(for: game, documentsDir: documentsDir)
+        let screenshotMode = appSettings.screenshotDestination.bridgeMode
         try fm.createDirectory(at: saveDir, withIntermediateDirectories: true)
         try fm.createDirectory(at: logDir, withIntermediateDirectories: true)
         try fm.createDirectory(at: multipersistentDir, withIntermediateDirectories: true)
+        if appSettings.screenshotDestination != .photos {
+            try? fm.createDirectory(at: screenshotDir, withIntermediateDirectories: true)
+        }
 
         if appSettings.autoBackupCount > 0 {
             statusUpdate("Backing up saves...")
@@ -237,7 +243,8 @@ public final class EngineLauncher {
                                     showQuickBar: showQuickBar,
                                     mouseSpeed: mouseSpeed,
                                     initialTransparentTextboxes: transparentTextboxes != 0,
-                                    initialVariants: variant.split(separator: " ").map(String.init)
+                                    initialVariants: variant.split(separator: " ").map(String.init),
+                                    screenshotDestMode: Int(screenshotMode)
                                 )
                             }
                         }
@@ -256,6 +263,8 @@ public final class EngineLauncher {
                     multipersistentDir.path,
                     variant,
                     autoloadSlot ?? "",
+                    screenshotDir.path,
+                    screenshotMode,
                     Int32(sdlVersion),
                     Int32(allowNetwork),
                     Int32(devMode),
@@ -323,7 +332,8 @@ public final class EngineLauncher {
         showQuickBar: Bool,
         mouseSpeed: Double,
         initialTransparentTextboxes: Bool,
-        initialVariants: [String]
+        initialVariants: [String],
+        screenshotDestMode: Int
     ) {
         guard let scene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
@@ -344,12 +354,14 @@ public final class EngineLauncher {
             mouseSpeed: mouseSpeed,
             initialTransparentTextboxes: initialTransparentTextboxes,
             initialVariants: initialVariants,
-            onPersistSettings: { newOpacity, newFPS, newQuickBar, newMouseSpeed in
+            screenshotDestMode: screenshotDestMode,
+            onPersistSettings: { newOpacity, newFPS, newQuickBar, newMouseSpeed, newScreenshotMode in
                 var current = store.loadSettings()
                 current.overlayOpacity = newOpacity
                 current.showFPSOverlay = newFPS
                 current.showQuickBar = newQuickBar
                 current.virtualMouseSpeed = newMouseSpeed
+                current.screenshotDestination = ScreenshotDestination(bridgeMode: Int32(newScreenshotMode))
                 try? store.saveSettings(current)
             }
         )
@@ -988,6 +1000,8 @@ public final class EngineLauncher {
         _renplay_c_consume_mouse = None
         _renplay_c_consume_rpc = None
         _renplay_c_post_rpc_reply = None
+        _renplay_c_get_ss_mode = None
+        _renplay_c_on_ss_saved = None
 
         try:
             _renplay_self_lib = _renplay_ctypes.CDLL(None)
@@ -1039,8 +1053,45 @@ public final class EngineLauncher {
             if _renplay_c_post_rpc_reply is not None:
                 _renplay_c_post_rpc_reply.argtypes = [_renplay_ctypes.c_char_p]
                 _renplay_c_post_rpc_reply.restype = None
+
+            _renplay_c_get_ss_mode = getattr(_renplay_self_lib, "renplay_bridge_get_screenshot_mode", None)
+            if _renplay_c_get_ss_mode is not None:
+                _renplay_c_get_ss_mode.argtypes = []
+                _renplay_c_get_ss_mode.restype = _renplay_ctypes.c_int
+
+            _renplay_c_on_ss_saved = getattr(_renplay_self_lib, "renplay_bridge_on_screenshot_saved", None)
+            if _renplay_c_on_ss_saved is not None:
+                _renplay_c_on_ss_saved.argtypes = [_renplay_ctypes.c_char_p, _renplay_ctypes.c_int]
+                _renplay_c_on_ss_saved.restype = None
         except Exception:
             _renplay_c_consume_cmd = None
+
+        def _renplay_screenshot_callback(fn):
+            mode = 0
+            if _renplay_c_get_ss_mode is not None:
+                try:
+                    mode = int(_renplay_c_get_ss_mode())
+                except Exception:
+                    mode = 0
+            base_name = _renplay_os.path.basename(fn)
+            if mode in (1, 2) and _renplay_c_on_ss_saved is not None:
+                raw_fn = fn.encode("utf-8") if not isinstance(fn, bytes) else fn
+                delete_after = 1 if mode == 1 else 0
+                try:
+                    _renplay_c_on_ss_saved(raw_fn, delete_after)
+                except Exception:
+                    pass
+            if mode == 1:
+                renpy.notify("Saved screenshot to Photos")
+            elif mode == 2:
+                renpy.notify("Saved %s to Documents & Photos" % base_name)
+            else:
+                renpy.notify("Saved %s to Screenshots" % base_name)
+
+        try:
+            config.screenshot_callback = _renplay_screenshot_callback
+        except Exception:
+            pass
 
         _renplay_pg_mods = []
         try:

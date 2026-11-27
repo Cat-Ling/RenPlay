@@ -20,7 +20,8 @@ final class GameOverlayWindow: UIWindow {
         mouseSpeed: Double,
         initialTransparentTextboxes: Bool,
         initialVariants: [String],
-        onPersistSettings: ((Double, Bool, Bool, Double) -> Void)?
+        screenshotDestMode: Int,
+        onPersistSettings: ((Double, Bool, Bool, Double, Int) -> Void)?
     ) {
         let controller = GameOverlayViewController(
             gameID: gameID,
@@ -33,6 +34,7 @@ final class GameOverlayWindow: UIWindow {
             mouseSpeed: mouseSpeed,
             initialTransparentTextboxes: initialTransparentTextboxes,
             initialVariants: initialVariants,
+            screenshotDestMode: screenshotDestMode,
             onPersistSettings: onPersistSettings
         )
         self.overlayController = controller
@@ -124,7 +126,8 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
     private var activeModal: HudModalKind?
     private var transparentTextboxes: Bool
     private var selectedVariants: Set<String>
-    private let onPersistSettings: ((Double, Bool, Bool, Double) -> Void)?
+    private var screenshotDestMode: Int
+    private let onPersistSettings: ((Double, Bool, Bool, Double, Int) -> Void)?
     private var selectedRotationMode: Int = Int(renplay_get_preferred_orientation())
 
     // Dynamic modal views updated on RPC reply
@@ -165,7 +168,8 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         mouseSpeed: Double,
         initialTransparentTextboxes: Bool,
         initialVariants: [String],
-        onPersistSettings: ((Double, Bool, Bool, Double) -> Void)?
+        screenshotDestMode: Int,
+        onPersistSettings: ((Double, Bool, Bool, Double, Int) -> Void)?
     ) {
         self.gameID = gameID
         self.gameName = gameName
@@ -183,6 +187,7 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         } else {
             self.selectedVariants = Set(initialVariants)
         }
+        self.screenshotDestMode = screenshotDestMode
         self.onPersistSettings = onPersistSettings
         let saved = UserDefaults.standard.stringArray(forKey: "renplay.savedVars.\(gameID.uuidString)") ?? []
         self.savedVarNames = Set(saved)
@@ -917,7 +922,7 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
     }
 
     private func persistOverlaySettings() {
-        onPersistSettings?(Double(overlayAlpha), showFPS, showQuickBar, Double(mouseSpeed))
+        onPersistSettings?(Double(overlayAlpha), showFPS, showQuickBar, Double(mouseSpeed), screenshotDestMode)
     }
 
     private func buildSettingsModal() {
@@ -978,6 +983,17 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
             self.persistOverlaySettings()
         }, for: .valueChanged)
         modalBody.addArrangedSubview(makeLabeledRow("Mouse Speed", control: speedSlider))
+
+        let shotSeg = UISegmentedControl(items: ["Files", "Photos", "Both"])
+        shotSeg.selectedSegmentIndex = min(max(screenshotDestMode, 0), 2)
+        shotSeg.addAction(UIAction { [weak self, weak shotSeg] _ in
+            guard let self, let shotSeg else { return }
+            let mode = shotSeg.selectedSegmentIndex
+            self.screenshotDestMode = mode
+            renplay_set_screenshot_destination(Int32(mode))
+            self.persistOverlaySettings()
+        }, for: .valueChanged)
+        modalBody.addArrangedSubview(makeLabeledRow("Screenshots", control: shotSeg))
     }
 
     private func buildToolsModal() {

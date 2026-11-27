@@ -18,6 +18,8 @@
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
     <string>RenPlay uses your local network to browse and stream games from SMB/LAN shares or receive games via Wi-Fi Browser Upload.</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>RenPlay saves in-game screenshots to your Photos library when Photos is selected in Settings.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_smb._tcp</string>

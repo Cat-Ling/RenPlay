@@ -150,6 +150,8 @@ init 999 python:
     _renplay_c_consume_mouse = None
     _renplay_c_consume_rpc = None
     _renplay_c_post_rpc_reply = None
+    _renplay_c_get_ss_mode = None
+    _renplay_c_on_ss_saved = None
 
     try:
         _renplay_self_lib = _renplay_ctypes.CDLL(None)
@@ -201,8 +203,45 @@ init 999 python:
         if _renplay_c_post_rpc_reply is not None:
             _renplay_c_post_rpc_reply.argtypes = [_renplay_ctypes.c_char_p]
             _renplay_c_post_rpc_reply.restype = None
+
+        _renplay_c_get_ss_mode = getattr(_renplay_self_lib, "renplay_bridge_get_screenshot_mode", None)
+        if _renplay_c_get_ss_mode is not None:
+            _renplay_c_get_ss_mode.argtypes = []
+            _renplay_c_get_ss_mode.restype = _renplay_ctypes.c_int
+
+        _renplay_c_on_ss_saved = getattr(_renplay_self_lib, "renplay_bridge_on_screenshot_saved", None)
+        if _renplay_c_on_ss_saved is not None:
+            _renplay_c_on_ss_saved.argtypes = [_renplay_ctypes.c_char_p, _renplay_ctypes.c_int]
+            _renplay_c_on_ss_saved.restype = None
     except Exception:
         _renplay_c_consume_cmd = None
+
+    def _renplay_screenshot_callback(fn):
+        mode = 0
+        if _renplay_c_get_ss_mode is not None:
+            try:
+                mode = int(_renplay_c_get_ss_mode())
+            except Exception:
+                mode = 0
+        base_name = _renplay_os.path.basename(fn)
+        if mode in (1, 2) and _renplay_c_on_ss_saved is not None:
+            raw_fn = fn.encode("utf-8") if not isinstance(fn, bytes) else fn
+            delete_after = 1 if mode == 1 else 0
+            try:
+                _renplay_c_on_ss_saved(raw_fn, delete_after)
+            except Exception:
+                pass
+        if mode == 1:
+            renpy.notify("Saved screenshot to Photos")
+        elif mode == 2:
+            renpy.notify("Saved %s to Documents & Photos" % base_name)
+        else:
+            renpy.notify("Saved %s to Screenshots" % base_name)
+
+    try:
+        config.screenshot_callback = _renplay_screenshot_callback
+    except Exception:
+        pass
 
     _renplay_pg_mods = []
     try:
