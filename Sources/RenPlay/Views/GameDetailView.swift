@@ -192,27 +192,59 @@ struct GameDetailView: View {
     }
 
     private func playButton(for game: GameEntry, resolved: EngineInfo?) -> some View {
-        let canResume = game.lastPlayedAt != nil || !saveSlots.isEmpty
-        let title: String
-        if let pct = game.dialogueProgressFraction, canResume {
-            title = "Resume • \(Int((pct * 100).rounded()))%"
-        } else {
-            title = canResume ? "Resume" : "Play"
-        }
+        let resumeSlot = saveSlots.filter { $0.renpySlotName != nil }.max(by: { $0.modifiedAt < $1.modifiedAt })
+        let pctLabel = game.dialogueProgressFraction.map { " • \(Int(($0 * 100).rounded()))%" } ?? ""
+        let tintColor = Color(category: game.category)
 
-        return Button {
-            appState.launch(game: game)
-        } label: {
-            Label(title, systemImage: "play.fill")
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 6)
+        return Group {
+            if let resumeSlot, let slotName = resumeSlot.renpySlotName {
+                HStack(spacing: 10) {
+                    Button {
+                        appState.launch(game: game, autoloadSlot: slotName)
+                    } label: {
+                        Label("Resume\(pctLabel)", systemImage: "play.fill")
+                            .font(.headline)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(tintColor)
+                    .controlSize(.large)
+                    .clipShape(.capsule)
+                    .disabled(resolved == nil || appState.isLaunching)
+
+                    Button {
+                        appState.launch(game: game, autoloadSlot: nil)
+                    } label: {
+                        Label("Main Menu", systemImage: "house")
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(tintColor)
+                    .controlSize(.large)
+                    .clipShape(.capsule)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .disabled(resolved == nil || appState.isLaunching)
+                }
+            } else {
+                Button {
+                    appState.launch(game: game, autoloadSlot: nil)
+                } label: {
+                    Label("Play", systemImage: "play.fill")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(tintColor)
+                .controlSize(.large)
+                .clipShape(.capsule)
+                .disabled(resolved == nil || appState.isLaunching)
+            }
         }
-        .buttonStyle(.borderedProminent)
-        .tint(Color(category: game.category))
-        .controlSize(.large)
-        .clipShape(.capsule)
-        .disabled(resolved == nil || appState.isLaunching)
     }
 
     private func quickActionsRow(for game: GameEntry, gameBinding: Binding<GameEntry>) -> some View {
@@ -354,47 +386,78 @@ struct GameDetailView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
                         ForEach(saveSlots.prefix(10)) { slot in
-                            NavigationLink {
-                                GameSaveManagerView(appState: appState, game: game)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Color.clear
-                                        .frame(width: 148, height: 84)
-                                        .overlay {
-                                            if let data = slot.screenshotData, let img = UIImage(data: data) {
-                                                Image(uiImage: img)
-                                                    .resizable()
-                                                    .scaledToFill()
-                                            } else {
-                                                Color(.tertiarySystemGroupedBackground)
-                                                    .overlay {
-                                                        Image(systemName: slot.kind == .persistent ? "gearshape.2" : "photo")
-                                                            .foregroundStyle(.secondary)
-                                                    }
-                                            }
-                                        }
-                                        .clipped()
-                                        .clipShape(.rect(cornerRadius: 8))
-
-                                    Text(slot.slotLabel)
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.primary)
-                                        .lineLimit(1)
-
-                                    Text(slot.modifiedAt, style: .relative)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                            if let slotName = slot.renpySlotName {
+                                Button {
+                                    appState.launch(game: game, autoloadSlot: slotName)
+                                } label: {
+                                    saveStripCardBody(slot, showPlayBadge: true)
                                 }
-                                .frame(width: 148, alignment: .leading)
+                                .buttonStyle(.plain)
+                                .disabled(appState.resolvedEngine(for: game) == nil || appState.isLaunching)
+                                .contextMenu {
+                                    Button("Load Save & Play", systemImage: "play.fill") {
+                                        appState.launch(game: game, autoloadSlot: slotName)
+                                    }
+                                    .disabled(appState.resolvedEngine(for: game) == nil || appState.isLaunching)
+                                }
+                            } else {
+                                NavigationLink {
+                                    GameSaveManagerView(appState: appState, game: game)
+                                } label: {
+                                    saveStripCardBody(slot, showPlayBadge: false)
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                     .padding(.horizontal)
                 }
             }
         }
+    }
+
+    private func saveStripCardBody(_ slot: SaveSlot, showPlayBadge: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Color.clear
+                .frame(width: 148, height: 84)
+                .overlay {
+                    if let data = slot.screenshotData, let img = UIImage(data: data) {
+                        Image(uiImage: img)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        Color(.tertiarySystemGroupedBackground)
+                            .overlay {
+                                Image(systemName: slot.kind == .persistent ? "gearshape.2" : "photo")
+                                    .foregroundStyle(.secondary)
+                            }
+                    }
+                }
+                .clipped()
+                .overlay(alignment: .bottomTrailing) {
+                    if showPlayBadge {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(6)
+                            .background(.black.opacity(0.55))
+                            .clipShape(.circle)
+                            .padding(5)
+                    }
+                }
+                .clipShape(.rect(cornerRadius: 8))
+
+            Text(slot.slotLabel)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            Text(slot.modifiedAt, style: .relative)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(width: 148, alignment: .leading)
     }
 
     private func detailsCardsSection(for game: GameEntry) -> some View {
@@ -450,22 +513,58 @@ struct GameDetailView: View {
     }
 
     private func engineSection(for game: GameEntry, gameBinding: Binding<GameEntry>, resolved: EngineInfo?) -> some View {
-        VStack(spacing: 0) {
-            HStack {
+        let collapsedLabel: String = switch gameBinding.wrappedValue.settings.engineMode {
+        case .auto:
+            "Auto • \(resolved?.version ?? "—")"
+        case .pinned(let id):
+            resolved?.version ?? id
+        }
+
+        return VStack(spacing: 0) {
+            HStack(spacing: 12) {
                 Text("Engine")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                Spacer()
-                Picker("Engine", selection: engineSelectionBinding(for: gameBinding)) {
-                    Text("Engine \(resolved?.version ?? "Auto") (Auto)").tag("auto")
-                    ForEach(appState.engines) { eng in
-                        Text("Ren'Py \(eng.version) (\(eng.sdlVersion))").tag(eng.id)
+                    .fixedSize()
+                Spacer(minLength: 8)
+                Menu {
+                    Button {
+                        engineSelectionBinding(for: gameBinding).wrappedValue = "auto"
+                    } label: {
+                        let autoTitle = "Auto (\(resolved?.version ?? "Unavailable"))"
+                        if case .auto = gameBinding.wrappedValue.settings.engineMode {
+                            Label(autoTitle, systemImage: "checkmark")
+                        } else {
+                            Text(autoTitle)
+                        }
                     }
+                    Divider()
+                    ForEach(appState.engines) { eng in
+                        Button {
+                            engineSelectionBinding(for: gameBinding).wrappedValue = eng.id
+                        } label: {
+                            let rowTitle = "Ren'Py \(eng.version) (\(eng.sdlVersion))"
+                            if case .pinned(let id) = gameBinding.wrappedValue.settings.engineMode, id == eng.id {
+                                Label(rowTitle, systemImage: "checkmark")
+                            } else {
+                                Text(rowTitle)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(collapsedLabel)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.caption2.weight(.semibold))
+                    }
+                    .font(.subheadline.weight(.medium).monospacedDigit())
+                    .foregroundStyle(.tint)
                 }
-                .pickerStyle(.menu)
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.vertical, 12)
 
             Divider().padding(.leading, 14)
 

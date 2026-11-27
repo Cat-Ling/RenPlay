@@ -14,7 +14,24 @@ init 999 python:
 
     _renplay_safe_mode = _renplay_os.environ.get("RENPY_SAFE_MODE") == "1"
 
-    if not _renplay_safe_mode:
+    def _renplay_clear_autoload():
+        _renplay_os.environ.pop("RENPY_AUTO_LOAD", None)
+
+    try:
+        if _renplay_clear_autoload not in config.after_load_callbacks:
+            config.after_load_callbacks.append(_renplay_clear_autoload)
+    except Exception:
+        pass
+
+    if _renplay_safe_mode:
+        try:
+            config.image_cache_size_mb = 64
+            config.gl_powersave = True
+            config.predict_statements = 0
+            config.autoreload = False
+        except Exception:
+            pass
+    else:
         if _renplay_os.environ.get("RENPY_DEV_MODE") == "1":
             config.developer = True
         if _renplay_os.environ.get("RENPY_ENABLE_CONSOLE") == "1":
@@ -28,6 +45,58 @@ init 999 python:
             config.skip_indicator = True
         if _renplay_os.environ.get("RENPY_FORCE_UNSEEN_SKIP") == "1":
             preferences.skip_unseen = True
+
+        if _renplay_os.environ.get("RENPY_COMPAT_PATCHES") == "1":
+            try:
+                config.autoreload = False
+                config.quit_on_mobile_background = False
+            except Exception:
+                pass
+            if not hasattr(_renplay_os, "startfile"):
+                _renplay_os.startfile = lambda *args, **kwargs: None
+            if not hasattr(_renplay_ctypes, "windll"):
+                class _RenPlayWinFunc(object):
+                    def __init__(self, dll_name, fn_name):
+                        self._dll_name = dll_name
+                        self._fn_name = fn_name
+                    def __call__(self, *args, **kwargs):
+                        if self._dll_name == "user32" and self._fn_name == "GetSystemMetrics":
+                            idx = args[0] if args else 0
+                            if idx == 0:
+                                return int(getattr(config, "screen_width", 1920) or 1920)
+                            if idx == 1:
+                                return int(getattr(config, "screen_height", 1080) or 1080)
+                        return 0
+                class _RenPlayWinLib(object):
+                    def __init__(self, dll_name):
+                        self._dll_name = dll_name
+                    def __getattr__(self, fn_name):
+                        return _RenPlayWinFunc(self._dll_name, fn_name)
+                class _RenPlayWinDLL(object):
+                    def __getattr__(self, dll_name):
+                        return _RenPlayWinLib(dll_name.lower())
+                _renplay_ctypes.windll = _RenPlayWinDLL()
+            try:
+                _loader = renpy.loader
+                if not getattr(_loader, "_renplay_compat_hooked", False):
+                    _str_types = (str, type(u""))
+                    _orig_load = getattr(_loader, "load", None)
+                    _orig_loadable = getattr(_loader, "loadable", None)
+                    if _orig_load is not None:
+                        def _renplay_norm_load(name, *args, **kwargs):
+                            if isinstance(name, _str_types) and "\\" in name:
+                                name = name.replace("\\", "/")
+                            return _orig_load(name, *args, **kwargs)
+                        _loader.load = _renplay_norm_load
+                    if _orig_loadable is not None:
+                        def _renplay_norm_loadable(name, *args, **kwargs):
+                            if isinstance(name, _str_types) and "\\" in name:
+                                name = name.replace("\\", "/")
+                            return _orig_loadable(name, *args, **kwargs)
+                        _loader.loadable = _renplay_norm_loadable
+                    _loader._renplay_compat_hooked = True
+            except Exception:
+                pass
 
     try:
         _vol_str = _renplay_os.environ.get("RENPY_MASTER_VOLUME", "")
@@ -187,36 +256,37 @@ init 999 python:
             _k.start_text_input = _renplay_start_text_input
             _k.stop_text_input = _renplay_stop_text_input
 
-        try:
-            _input_cls = renpy.display.behavior.Input
-            if not getattr(_input_cls, "_renplay_hooked", False):
-                _orig_input_render = _input_cls.render
-                _orig_input_event = _input_cls.event
+        if not _renplay_safe_mode:
+            try:
+                _input_cls = renpy.display.behavior.Input
+                if not getattr(_input_cls, "_renplay_hooked", False):
+                    _orig_input_render = _input_cls.render
+                    _orig_input_event = _input_cls.event
 
-                def _renplay_input_render(self, width, height, st, at):
-                    rv = _orig_input_render(self, width, height, st, at)
-                    try:
-                        self._renplay_wh = (rv.width, rv.height)
-                    except Exception:
-                        pass
-                    return rv
-
-                def _renplay_input_event(self, ev, x, y, st):
-                    if _renplay_pg is not None and getattr(self, "editable", False):
+                    def _renplay_input_render(self, width, height, st, at):
+                        rv = _orig_input_render(self, width, height, st, at)
                         try:
-                            if ev.type == _renplay_pg.MOUSEBUTTONDOWN and getattr(ev, "button", 1) == 1:
-                                w, h = getattr(self, "_renplay_wh", (0, 0))
-                                if w > 0 and h > 0 and 0 <= x <= w and 0 <= y <= h:
-                                    _renplay_c_reopen()
+                            self._renplay_wh = (rv.width, rv.height)
                         except Exception:
                             pass
-                    return _orig_input_event(self, ev, x, y, st)
+                        return rv
 
-                _input_cls.render = _renplay_input_render
-                _input_cls.event = _renplay_input_event
-                _input_cls._renplay_hooked = True
-        except Exception:
-            pass
+                    def _renplay_input_event(self, ev, x, y, st):
+                        if _renplay_pg is not None and getattr(self, "editable", False):
+                            try:
+                                if ev.type == _renplay_pg.MOUSEBUTTONDOWN and getattr(ev, "button", 1) == 1:
+                                    w, h = getattr(self, "_renplay_wh", (0, 0))
+                                    if w > 0 and h > 0 and 0 <= x <= w and 0 <= y <= h:
+                                        _renplay_c_reopen()
+                            except Exception:
+                                pass
+                        return _orig_input_event(self, ev, x, y, st)
+
+                    _input_cls.render = _renplay_input_render
+                    _input_cls.event = _renplay_input_event
+                    _input_cls._renplay_hooked = True
+            except Exception:
+                pass
 
     _renplay_mod_mask = 0
     _renplay_session_id = str(_renplay_uuid.uuid4())
@@ -350,7 +420,7 @@ init 999 python:
                     p._seen_ever = {}
                 for k in getattr(renpy.game.script, "namemap", {}).keys():
                     p._seen_ever[k] = True
-                if getattr(p, "_seen_images", None) is None or not isinstance(p._seen_images, dict):
+                if getattr(p, "_seen_images", None) is None:
                     try:
                         p._seen_images = {}
                     except Exception:
@@ -362,9 +432,24 @@ init 999 python:
                 elif isinstance(p._seen_images, set):
                     for ik in imgs.keys():
                         p._seen_images.add(ik)
+                _gi_cls = getattr(renpy.store, "__GalleryImage", None)
+                if _gi_cls is not None:
+                    _gi_cls.check_unlock = lambda self, all_prior: True
+                _gb_cls = getattr(renpy.store, "__GalleryButton", None)
+                if _gb_cls is not None:
+                    _gb_cls.check_unlock = lambda self: True
+                _rp_cls = getattr(renpy.store, "Replay", None)
+                if _rp_cls is not None:
+                    _rp_cls.get_sensitive = lambda self: True
+                renpy.exports.seen_image = lambda name: True
+                renpy.exports.seen_label = lambda label: True
+                if hasattr(renpy, "seen_image"):
+                    renpy.seen_image = lambda name: True
+                if hasattr(renpy, "seen_label"):
+                    renpy.seen_label = lambda label: True
                 try:
                     for obj in list(renpy.store.__dict__.values()):
-                        if hasattr(obj, "buttons") and hasattr(obj, "unlocked"):
+                        if hasattr(obj, "buttons") and hasattr(obj, "make_button"):
                             try:
                                 obj.unlocked_advance = True
                             except Exception:
@@ -372,6 +457,11 @@ init 999 python:
                             for _bname, btn in getattr(obj, "buttons", {}).items():
                                 try:
                                     btn.conditions = []
+                                    for _gimg in getattr(btn, "images", []):
+                                        try:
+                                            _gimg.conditions = []
+                                        except Exception:
+                                            pass
                                 except Exception:
                                     pass
                 except Exception:

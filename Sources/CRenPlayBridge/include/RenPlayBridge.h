@@ -46,6 +46,7 @@ int renplay_launch_engine(
     const char *logDir,
     const char *multipersistentDir,
     const char *variant,
+    const char *autoloadSaveSlot,
     int sdlVersionHint,
     int allowNetwork,
     int devMode,

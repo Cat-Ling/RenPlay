@@ -279,17 +279,40 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         mouseTrackpadView.addGestureRecognizer(rightTap)
         view.addSubview(mouseTrackpadView)
 
-        let cfg = UIImage.SymbolConfiguration(pointSize: 22, weight: .regular)
-        cursorView.image = UIImage(systemName: "cursorarrow", withConfiguration: cfg)
-        cursorView.tintColor = .white
-        cursorView.layer.shadowColor = UIColor.black.cgColor
-        cursorView.layer.shadowOpacity = 0.85
-        cursorView.layer.shadowRadius = 2
-        cursorView.layer.shadowOffset = CGSize(width: 1, height: 1)
-        cursorView.frame = CGRect(x: 0, y: 0, width: 24, height: 24)
+        cursorView.image = Self.makeCursorArrowImage()
+        cursorView.contentMode = .topLeft
+        cursorView.frame = CGRect(x: 0, y: 0, width: 16, height: 22)
         cursorView.isHidden = true
         cursorView.isUserInteractionEnabled = false
         view.addSubview(cursorView)
+    }
+
+    private static func makeCursorArrowImage() -> UIImage {
+        let size = CGSize(width: 16, height: 22)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { ctx in
+            let path = UIBezierPath()
+            path.move(to: CGPoint(x: 1.5, y: 1.5))
+            path.addLine(to: CGPoint(x: 1.5, y: 16.5))
+            path.addLine(to: CGPoint(x: 5.3, y: 13.0))
+            path.addLine(to: CGPoint(x: 8.0, y: 19.2))
+            path.addLine(to: CGPoint(x: 10.2, y: 18.2))
+            path.addLine(to: CGPoint(x: 7.5, y: 12.1))
+            path.addLine(to: CGPoint(x: 12.5, y: 12.1))
+            path.close()
+            path.lineJoinStyle = .round
+
+            let cg = ctx.cgContext
+            cg.saveGState()
+            cg.setShadow(offset: CGSize(width: 0.5, height: 1.0), blur: 1.5, color: UIColor.black.withAlphaComponent(0.55).cgColor)
+            UIColor.white.setFill()
+            path.fill()
+            cg.restoreGState()
+
+            UIColor.black.setStroke()
+            path.lineWidth = 1.2
+            path.stroke()
+        }
     }
 
     private func setupExpandedBackdrop() {
@@ -316,6 +339,10 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         pan.delaysTouchesBegan = false
         pan.cancelsTouchesInView = true
         toggleButton.addGestureRecognizer(pan)
+
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleToggleLongPress(_:)))
+        longPress.minimumPressDuration = 0.42
+        toggleButton.addGestureRecognizer(longPress)
         view.addSubview(toggleButton)
 
         quickBarView.backgroundColor = UIColor(white: 0.12, alpha: max(overlayAlpha, 0.72))
@@ -1224,6 +1251,18 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         }
     }
 
+    @objc private func handleToggleLongPress(_ recognizer: UILongPressGestureRecognizer) {
+        guard recognizer.state == .began else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        if activeModal != nil {
+            closeModal()
+        }
+        isHUDExpanded = false
+        showQuickBar.toggle()
+        updateVisibility()
+        layoutAllFrames()
+    }
+
     @objc private func handleMousePan(_ recognizer: UIPanGestureRecognizer) {
         let bounds = view.bounds
         guard bounds.width > 0, bounds.height > 0 else { return }
@@ -1368,9 +1407,9 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
 
     private func layoutCursorFrame() {
         let bounds = view.bounds
-        let x = min(max(cursorNormPoint.x * bounds.width, 0), max(0, bounds.width - 20))
-        let y = min(max(cursorNormPoint.y * bounds.height, 0), max(0, bounds.height - 20))
-        cursorView.frame = CGRect(x: x, y: y, width: 24, height: 24)
+        let tipX = min(max(cursorNormPoint.x * bounds.width, 0), bounds.width)
+        let tipY = min(max(cursorNormPoint.y * bounds.height, 0), bounds.height)
+        cursorView.frame = CGRect(x: tipX - 1.5, y: tipY - 1.5, width: 16, height: 22)
     }
 
     private func layoutAllFrames() {

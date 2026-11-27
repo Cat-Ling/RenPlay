@@ -641,6 +641,13 @@ struct SaveAndLibraryTests {
         let renamedID = try store.renameSaveFolder(from: customID, to: "RenamedSlot")
         #expect(renamedID == "RenamedSlot")
         #expect(store.loadGames().first?.saveIdentifier == "RenamedSlot")
+        _ = try SaveManager().createBackup(
+            of: store.saveDirectory(forIdentifier: renamedID),
+            to: store.backupDirectory(forIdentifier: renamedID),
+            maxBackups: 3
+        )
+        let folderSummaries = store.listAllSaveFolders()
+        #expect(folderSummaries.first(where: { $0.id == "RenamedSlot" })?.backupCount == 1)
 
         let mpSource = srcParent.appendingPathComponent("AGMPV")
         try Data("MP".utf8).write(to: mpSource)
@@ -796,5 +803,26 @@ struct SMBStreamingTests {
             }
         }
         #expect(rc < 0)
+    }
+
+    @Test("SaveSlot.renpySlotName strips .save suffix and AppSettings defaults quick bar hidden")
+    func slotNameAndQuickBarDefaults() throws {
+        let now = Date()
+        let manual = SaveSlot(filename: "1-1.save", kind: .manual, slotLabel: "Page 1 • 1", modifiedAt: now, fileSize: 100)
+        let auto = SaveSlot(filename: "auto-2.save", kind: .auto, slotLabel: "Auto 2", modifiedAt: now, fileSize: 100)
+        let quick = SaveSlot(filename: "quick-1.save", kind: .quick, slotLabel: "Quick 1", modifiedAt: now, fileSize: 100)
+        let persist = SaveSlot(filename: "persistent", kind: .persistent, slotLabel: "Persistent", modifiedAt: now, fileSize: 100)
+
+        #expect(manual.renpySlotName == "1-1")
+        #expect(auto.renpySlotName == "auto-2")
+        #expect(quick.renpySlotName == "quick-1")
+        #expect(persist.renpySlotName == nil)
+
+        var settings = AppSettings()
+        #expect(settings.showQuickBar == false)
+        settings.showQuickBar = true
+        let encoded = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: encoded)
+        #expect(decoded.showQuickBar == true)
     }
 }

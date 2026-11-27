@@ -433,7 +433,7 @@ public final class AppState {
         )
     }
 
-    public func launch(game: GameEntry) {
+    public func launch(game: GameEntry, autoloadSlot: String? = nil) {
         guard let engine = resolvedEngine(for: game) else {
             showError("No matching Ren'Py engine is bundled to launch this game.", title: "Launch Failed")
             return
@@ -450,7 +450,8 @@ public final class AppState {
                 try await launcher.launch(
                     game: updated,
                     engine: engine,
-                    appSettings: appSettings
+                    appSettings: appSettings,
+                    autoloadSlot: autoloadSlot
                 ) { status in
                     Task { @MainActor in
                         self.launchStatus = status

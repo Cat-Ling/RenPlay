@@ -394,6 +394,7 @@ public struct SaveFolderSummary: Identifiable, Sendable, Hashable {
     public let id: String
     public let displayName: String
     public let slotCount: Int
+    public let backupCount: Int
     public let sizeBytes: Int64
     public let modifiedAt: Date
     public let linkedGameID: UUID?
@@ -403,6 +404,7 @@ public struct SaveFolderSummary: Identifiable, Sendable, Hashable {
         id: String,
         displayName: String,
         slotCount: Int,
+        backupCount: Int = 0,
         sizeBytes: Int64,
         modifiedAt: Date,
         linkedGameID: UUID? = nil,
@@ -411,6 +413,7 @@ public struct SaveFolderSummary: Identifiable, Sendable, Hashable {
         self.id = id
         self.displayName = displayName
         self.slotCount = slotCount
+        self.backupCount = backupCount
         self.sizeBytes = sizeBytes
         self.modifiedAt = modifiedAt
         self.linkedGameID = linkedGameID
@@ -507,6 +510,14 @@ public struct SaveSlot: Identifiable, Sendable, Hashable {
     public var extraInfo: String?
     public var screenshotData: Data?
 
+    public var renpySlotName: String? {
+        guard kind != .persistent else { return nil }
+        if filename.lowercased().hasSuffix(".save") {
+            return String(filename.dropLast(5))
+        }
+        return filename
+    }
+
     public init(
         filename: String,
         kind: SaveKind,
@@ -563,6 +574,31 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var showQuickBar: Bool
     public var virtualMouseSpeed: Double
 
+    private enum CodingKeys: String, CodingKey {
+        case defaultEngineStrategy
+        case autoBackupCount
+        case showOverlayByDefault
+        case overlayOpacity
+        case globalAllowNetwork
+        case libraryLayoutMode
+        case defaultRotation
+        case renpyMasterVolume
+        case globalDeveloperMode
+        case globalEnableConsole
+        case globalLowMemory
+        case globalLessUpdates
+        case globalForceRollback
+        case globalForceSkip
+        case globalForceUnseenSkip
+        case globalTransparentTextboxes
+        case globalCompatibilityPatches
+        case globalOverrideVariant
+        case globalSelectedVariants
+        case showFPSOverlay
+        case showQuickBar = "quickBarVisibleByDefault"
+        case virtualMouseSpeed
+    }
+
     public init(
         defaultEngineStrategy: EngineSelectionStrategy = .accurate,
         autoBackupCount: Int = 5,
@@ -584,7 +620,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         globalOverrideVariant: Bool = false,
         globalSelectedVariants: [String] = [],
         showFPSOverlay: Bool = false,
-        showQuickBar: Bool = true,
+        showQuickBar: Bool = false,
         virtualMouseSpeed: Double = 1.0
     ) {
         self.defaultEngineStrategy = defaultEngineStrategy
@@ -633,7 +669,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         globalOverrideVariant = try c.decodeIfPresent(Bool.self, forKey: .globalOverrideVariant) ?? false
         globalSelectedVariants = try c.decodeIfPresent([String].self, forKey: .globalSelectedVariants) ?? []
         showFPSOverlay = try c.decodeIfPresent(Bool.self, forKey: .showFPSOverlay) ?? false
-        showQuickBar = try c.decodeIfPresent(Bool.self, forKey: .showQuickBar) ?? true
+        showQuickBar = try c.decodeIfPresent(Bool.self, forKey: .showQuickBar) ?? false
         virtualMouseSpeed = try c.decodeIfPresent(Double.self, forKey: .virtualMouseSpeed) ?? 1.0
     }
 }

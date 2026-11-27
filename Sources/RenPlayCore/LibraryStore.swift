@@ -642,17 +642,21 @@ public final class LibraryStore: @unchecked Sendable {
             seen.insert(id)
             let linked = byIdentifier[id]
             let files = saveFilesInDirectory(dir)
+            let backups = backupFilesInDirectory(backupDirectory(forIdentifier: id))
             // Unlinked empty folders with no backups are stale artifacts unless explicitly created with meta.
-            if linked == nil && files.isEmpty && backupFilesInDirectory(backupDirectory(forIdentifier: id)).isEmpty && readSaveMeta(in: dir) == nil {
+            if linked == nil && files.isEmpty && backups.isEmpty && readSaveMeta(in: dir) == nil {
                 continue
             }
             let bytes = directoryFileBytes(dir)
-            let newest = files.compactMap { try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }.max() ?? Date.distantPast
-            let display = linked?.displayName ?? readSaveMeta(in: dir)?.displayName ?? id
+            let newest = (files + backups)
+                .compactMap { try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }
+                .max() ?? Date.distantPast
+            let display = linked?.displayName ?? readSaveMeta(in: dir)?.displayName ?? (UUID(uuidString: id) == nil ? id : "Saved Data (\(id.prefix(6)))")
             summaries.append(SaveFolderSummary(
                 id: id,
                 displayName: display,
                 slotCount: files.count,
+                backupCount: backups.count,
                 sizeBytes: bytes,
                 modifiedAt: newest,
                 linkedGameID: linked?.id,
@@ -664,10 +668,12 @@ public final class LibraryStore: @unchecked Sendable {
         for g in games {
             let id = g.saveIdentifier ?? g.id.uuidString
             if !seen.contains(id) {
+                let backups = backupFilesInDirectory(backupDirectory(forIdentifier: id))
                 summaries.append(SaveFolderSummary(
                     id: id,
                     displayName: g.displayName,
                     slotCount: 0,
+                    backupCount: backups.count,
                     sizeBytes: 0,
                     modifiedAt: g.lastPlayedAt ?? g.importedAt,
                     linkedGameID: g.id,

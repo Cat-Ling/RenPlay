@@ -1082,6 +1082,7 @@ int renplay_launch_engine(
     const char *logDir,
     const char *multipersistentDir,
     const char *variant,
+    const char *autoloadSaveSlot,
     int sdlVersionHint,
     int allowNetwork,
     int devMode,
@@ -1121,6 +1122,11 @@ int renplay_launch_engine(
     } else {
         unsetenv("RENPY_VARIANT");
     }
+    if (autoloadSaveSlot && autoloadSaveSlot[0] != '\0') {
+        setenv("RENPY_AUTO_LOAD", autoloadSaveSlot, 1);
+    } else {
+        unsetenv("RENPY_AUTO_LOAD");
+    }
     setenv("RENPY_PLATFORM", "ios-arm64", 1);
     setenv("RENPY_ALLOW_NETWORK", allowNetwork ? "1" : "0", 1);
     setenv("RENPY_DEV_MODE", devMode ? "1" : "0", 1);
@@ -1128,8 +1134,11 @@ int renplay_launch_engine(
     setenv("RENPY_FORCE_ROLLBACK", forceRollback ? "1" : "0", 1);
     setenv("RENPY_FORCE_SKIP", forceSkip ? "1" : "0", 1);
     setenv("RENPY_FORCE_UNSEEN_SKIP", forceUnseenSkip ? "1" : "0", 1);
-    setenv("RENPY_LESS_MEMORY", lessMemory ? "1" : "0", 1);
-    setenv("RENPY_LESS_UPDATES", lessUpdates ? "1" : "0", 1);
+    // Ren'Py checks key membership ("RENPY_LESS_MEMORY" in os.environ), not "1" vs "0".
+    if (lessMemory) setenv("RENPY_LESS_MEMORY", "1", 1);
+    else unsetenv("RENPY_LESS_MEMORY");
+    if (lessUpdates) setenv("RENPY_LESS_UPDATES", "1", 1);
+    else unsetenv("RENPY_LESS_UPDATES");
     setenv("RENPY_TRANSPARENT_TEXTBOX", transparentTextboxes ? "1" : "0", 1);
     setenv("RENPY_COMPAT_PATCHES", compatPatches ? "1" : "0", 1);
     setenv("RENPY_SAFE_MODE", safeMode ? "1" : "0", 1);
@@ -1592,6 +1601,7 @@ int renplay_launch_engine(
     const char *logDir,
     const char *multipersistentDir,
     const char *variant,
+    const char *autoloadSaveSlot,
     int sdlVersionHint,
     int allowNetwork,
     int devMode,
@@ -1615,6 +1625,7 @@ int renplay_launch_engine(
     (void)logDir;
     (void)multipersistentDir;
     (void)variant;
+    (void)autoloadSaveSlot;
     (void)sdlVersionHint;
     (void)allowNetwork;
     (void)devMode;
