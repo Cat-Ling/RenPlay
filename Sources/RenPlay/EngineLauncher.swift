@@ -3,6 +3,7 @@
 
 #if canImport(UIKit) && canImport(SwiftUI)
 import CRenPlayBridge
+import Darwin
 import Foundation
 import RenPlayCore
 import SwiftUI
@@ -71,7 +72,8 @@ public final class EngineLauncher {
     ) async throws {
         let fm = FileManager.default
         let engineRoot = cachedEnginesDirectory.appendingPathComponent(engine.version, isDirectory: true)
-        let markerURL = engineRoot.appendingPathComponent(".ready_\(engine.releaseTag)")
+        let cacheStamp = engine.engineSha256 ?? engine.releaseTag
+        let markerURL = engineRoot.appendingPathComponent(".ready_\(cacheStamp)")
 
         if !fm.fileExists(atPath: markerURL.path) {
             let zipName = engine.engineArchive.replacingOccurrences(of: ".zip", with: "")
@@ -119,7 +121,12 @@ public final class EngineLauncher {
         }
 
         if appSettings.showOverlayByDefault {
-            installOverlay(gameName: game.displayName, logDir: logDir, opacity: appSettings.overlayOpacity)
+            // Defer overlay window insertion one runloop turn so SwiftUI appearance transitions settle.
+            let name = game.displayName
+            let opacity = appSettings.overlayOpacity
+            DispatchQueue.main.async { [weak self] in
+                self?.installOverlay(gameName: name, logDir: logDir, opacity: opacity)
+            }
         }
 
         // Hide the SwiftUI root window so SDL's UIWindow becomes key cleanly.
@@ -152,6 +159,12 @@ public final class EngineLauncher {
         )
 
         removeOverlay()
+        if rc == 0 {
+            // Reset process after a normal engine exit so a subsequent launch cannot collide on SDL ObjC classes.
+            try? await Task.sleep(for: .milliseconds(150))
+            Darwin.exit(0)
+        }
+
         for scene in UIApplication.shared.connectedScenes {
             guard let ws = scene as? UIWindowScene else { continue }
             for win in ws.windows {
@@ -160,13 +173,12 @@ public final class EngineLauncher {
             }
         }
 
-        if rc != 0 {
-            let utf8Bytes = errBuf.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
-            let msg = String(decoding: utf8Bytes, as: UTF8.self)
-            if !msg.isEmpty {
-                throw LaunchError.engineFailure(msg)
-            }
+        let utf8Bytes = errBuf.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
+        let msg = String(decoding: utf8Bytes, as: UTF8.self)
+        if !msg.isEmpty {
+            throw LaunchError.engineFailure(msg)
         }
+        throw LaunchError.engineFailure("Engine exited with code \(rc). Check Session Logs for details.")
     }
 
     private func installOverlay(gameName: String, logDir: URL, opacity: Double) {
@@ -183,6 +195,7 @@ public final class EngineLauncher {
 
     private func removeOverlay() {
         overlayWindow?.isHidden = true
+        overlayWindow?.rootViewController = nil
         overlayWindow = nil
     }
 }

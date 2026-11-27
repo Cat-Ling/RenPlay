@@ -3,6 +3,7 @@
 
 #if canImport(UIKit) && canImport(SwiftUI)
 import CRenPlayBridge
+import Darwin
 import SwiftUI
 import UIKit
 
@@ -146,10 +147,15 @@ private struct GameOverlayHUDView: View {
             }
         }
         .confirmationDialog("Exit \(gameName)?", isPresented: $showExitConfirm, titleVisibility: .visible) {
-            Button("Quit to Library", role: .destructive) {
+            Button("Quit Game & Reset Runtime", role: .destructive) {
                 renplay_send_sdl_quit()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    Darwin.exit(0)
+                }
             }
             Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Exits RenPlay cleanly so the next launch starts with a fresh Python and SDL runtime.")
         }
     }
 

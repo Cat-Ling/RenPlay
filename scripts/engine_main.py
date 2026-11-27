@@ -40,25 +40,6 @@ def _ios_expanduser(path):
 os.path.expanduser = _ios_expanduser
 
 
-def _apply_runtime_overrides():
-    try:
-        import renpy
-    except Exception:
-        return
-
-    if os.environ.get("RENPY_DEV_MODE") == "1":
-        renpy.config.developer = True
-        renpy.config.console = True
-
-    if os.environ.get("RENPY_FORCE_ROLLBACK") == "1":
-        renpy.config.rollback_enabled = True
-        renpy.config.hard_rollback_limit = max(getattr(renpy.config, "hard_rollback_limit", 100), 256)
-
-    if os.environ.get("RENPY_FORCE_SKIP") == "1":
-        renpy.config.allow_skipping = True
-        renpy.config.skip_indicator = True
-
-
 def path_to_gamedir(basedir, name):
     if _GAME_ROOT:
         candidate = os.path.join(_GAME_ROOT, "game")
@@ -136,17 +117,6 @@ warnings.simplefilter("ignore", DeprecationWarning)
 import renpy.bootstrap
 
 renpy.__main__ = sys.modules[__name__]
-
-if os.environ.get("RENPY_DEV_MODE") == "1" or os.environ.get("RENPY_FORCE_ROLLBACK") == "1" or os.environ.get("RENPY_FORCE_SKIP") == "1":
-    if hasattr(renpy.config, "after_load_callbacks"):
-        pass
-    _orig_bootstrap = renpy.bootstrap.bootstrap
-
-    def _wrapped_bootstrap(base_dir):
-        _apply_runtime_overrides()
-        return _orig_bootstrap(base_dir)
-
-    renpy.bootstrap.bootstrap = _wrapped_bootstrap
 
 
 if __name__ == "__main__":

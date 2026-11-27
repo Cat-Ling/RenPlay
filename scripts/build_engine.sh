@@ -28,10 +28,24 @@ SDK_ZIP="$WORK_DIR/renpy-${VER}-sdk.zip"
 RENIOS_DIR="$WORK_DIR/renios"
 SDK_DIR="$WORK_DIR/sdk"
 
-BASE_URL="https://github.com/renpy/renpy/releases/download/${TAG}"
+MIRROR_REPO="${RENPY_MIRROR_REPO:-Cat-Ling/renpy-renios-mirror}"
+MIRROR_URL="https://github.com/${MIRROR_REPO}/releases/download/${TAG}"
+UPSTREAM_URL="https://github.com/renpy/renpy/releases/download/${TAG}"
+
+download_asset() {
+    local asset_name="$1"
+    local dest_path="$2"
+    if curl -fsSL --retry 2 "${MIRROR_URL}/${asset_name}" -o "$dest_path"; then
+        echo "Downloaded ${asset_name} from mirror (${MIRROR_REPO})."
+    else
+        echo "Mirror miss for ${asset_name}; downloading from upstream renpy/renpy..."
+        curl -fsSL --retry 3 "${UPSTREAM_URL}/${asset_name}" -o "$dest_path"
+    fi
+}
+
 echo "Downloading renpy-${VER}-renios.zip and renpy-${VER}-sdk.zip from ${TAG}..."
-curl -fsSL --retry 3 "${BASE_URL}/renpy-${VER}-renios.zip" -o "$RENIOS_ZIP"
-curl -fsSL --retry 3 "${BASE_URL}/renpy-${VER}-sdk.zip" -o "$SDK_ZIP"
+download_asset "renpy-${VER}-renios.zip" "$RENIOS_ZIP"
+download_asset "renpy-${VER}-sdk.zip" "$SDK_ZIP"
 
 mkdir -p "$RENIOS_DIR" "$SDK_DIR"
 unzip -q "$RENIOS_ZIP" -d "$RENIOS_DIR"
@@ -293,6 +307,8 @@ mkdir -p "$STAGE/base"
 
 cp "$SCRIPT_DIR/engine_main.py" "$STAGE/base/main.py"
 cp -R "$SDK_ROOT/renpy" "$STAGE/base/renpy"
+mkdir -p "$STAGE/base/renpy/common"
+cp "$SCRIPT_DIR/99renplay_overrides.rpy" "$STAGE/base/renpy/common/99renplay_overrides.rpy"
 
 # Copy iOS-specific base/lib (contains site.pyc/pyo, iossupport.py, pyobjus, python stdlib)
 if [ -d "$PROTO_DIR/base/lib" ]; then

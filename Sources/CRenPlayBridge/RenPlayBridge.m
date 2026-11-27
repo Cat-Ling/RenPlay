@@ -21,6 +21,7 @@
 static void *g_active_handle = NULL;
 static int g_active_sdl_version = 2;
 static char g_log_file_path[2048] = {0};
+static char g_loaded_framework[2048] = {0};
 static int g_text_input_active = 0;
 
 static UIWindowScene *renplay_find_foreground_scene(void) {
@@ -96,6 +97,13 @@ static UIWindow *renplay_find_game_window(void) {
 + (void)log:(char *)s {
     if (s != NULL) {
         NSLog(@"[RenPy] %s", s);
+        if (g_log_file_path[0] != '\0') {
+            FILE *fp = fopen(g_log_file_path, "a");
+            if (fp != NULL) {
+                fprintf(fp, "[RenPy] %s\n", s);
+                fclose(fp);
+            }
+        }
     }
 }
 @end
@@ -271,6 +279,17 @@ int renplay_launch_engine(
     setenv("RENPY_LESS_MEMORY", lessMemory ? "1" : "0", 1);
     setenv("RENPY_LESS_UPDATES", "1", 1);
 
+    if (g_loaded_framework[0] != '\0') {
+        if (errorBuf && errorBufSize > 0) {
+            snprintf(
+                errorBuf,
+                errorBufSize,
+                "An engine runtime was already loaded in this session. Close and reopen RenPlay to launch another game or engine version."
+            );
+        }
+        return -4;
+    }
+
     void *handle = dlopen(frameworkPath, RTLD_NOW | RTLD_LOCAL);
     if (handle == NULL) {
         const char *err = dlerror();
@@ -279,6 +298,7 @@ int renplay_launch_engine(
         }
         return -2;
     }
+    snprintf(g_loaded_framework, sizeof(g_loaded_framework), "%s", frameworkPath);
 
     typedef int (*EntryFn)(int, char **);
     EntryFn entry = (EntryFn)dlsym(handle, "renplay_launch");

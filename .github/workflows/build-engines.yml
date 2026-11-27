@@ -48,6 +48,8 @@ jobs:
           xcodebuild -version
 
       - name: Build dynamic framework and engine archive
+        env:
+          RENPY_MIRROR_REPO: Cat-Ling/renpy-renios-mirror
         run: |
           chmod +x scripts/build_engine.sh
           ./scripts/build_engine.sh "${{ matrix.tag }}" "${{ matrix.version }}" "${{ matrix.framework }}" "$PWD/out"
