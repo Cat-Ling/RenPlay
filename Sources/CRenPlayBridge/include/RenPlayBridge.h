@@ -48,6 +48,9 @@ void renplay_toggle_text_input(void);
 // Returns the path of the active session log file, or NULL if not launched.
 const char *renplay_get_log_file_path(void);
 
+// Returns 1 if an active SDL_uikitwindow is currently visible in the foreground scene, 0 otherwise.
+int renplay_has_sdl_window(void);
+
 #ifdef __cplusplus
 }
 #endif

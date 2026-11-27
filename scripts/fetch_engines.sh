@@ -18,7 +18,18 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 mkdir -p "$FW_DIR" "$ENG_DIR"
 
 echo "Downloading release '${RELEASE_TAG}' assets from ${REPO}..."
-gh release download "$RELEASE_TAG" --repo "$REPO" --dir "$TMP_DIR" --clobber
+ASSETS=$(gh release view "$RELEASE_TAG" --repo "$REPO" --json assets --jq '.assets[].name')
+if [ -z "$ASSETS" ]; then
+    echo "Error: No assets found in release ${RELEASE_TAG} on ${REPO}" >&2
+    exit 1
+fi
+while IFS= read -r asset; do
+    [ -z "$asset" ] && continue
+    echo "  Fetching ${asset}..."
+    if ! curl -fsSL --retry 3 "https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${asset}" -o "$TMP_DIR/$asset"; then
+        gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$asset" --dir "$TMP_DIR" --clobber
+    fi
+done <<< "$ASSETS"
 
 rm -rf "$FW_DIR"/*.framework
 rm -f "$ENG_DIR"/*.zip "$ENG_DIR"/engines-manifest.json

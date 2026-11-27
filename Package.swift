@@ -1,6 +1,14 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
+let packageDir: String = {
+    let file = #filePath
+    if let slash = file.lastIndex(of: "/") {
+        return String(file[..<slash])
+    }
+    return "."
+}()
+
 let package = Package(
     name: "RenPlay",
     platforms: [
@@ -30,6 +38,13 @@ let package = Package(
                 .unsafeFlags(["-fobjc-arc"], .when(platforms: [.iOS])),
             ],
             linkerSettings: [
+                .unsafeFlags(
+                    [
+                        "-F", "\(packageDir)/BundleResources/Frameworks",
+                        "-framework", "MetalANGLE",
+                    ],
+                    .when(platforms: [.iOS])
+                ),
                 .linkedFramework("UIKit", .when(platforms: [.iOS])),
                 .linkedFramework("Foundation", .when(platforms: [.iOS])),
                 .linkedFramework("AVFoundation", .when(platforms: [.iOS])),

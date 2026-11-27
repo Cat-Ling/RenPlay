@@ -11,13 +11,17 @@
 @import StoreKit;
 
 #include <dlfcn.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <objc/runtime.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+extern const unsigned char *glGetString(unsigned int name);
 
 static void *g_active_handle = NULL;
 static int g_active_sdl_version = 2;
@@ -456,9 +460,57 @@ static UIViewController *renplay_find_presenter(UIWindow *window) {
 + (void)requestAgeRange {}
 @end
 
+static void renplay_uncaught_exception_handler(NSException *exception) {
+    NSLog(@"[RenPlay-CRASH] Uncaught ObjC exception: %@: %@\n%@",
+          exception.name, exception.reason, exception.callStackSymbols);
+    if (g_log_file_path[0] != '\0') {
+        FILE *fp = fopen(g_log_file_path, "a");
+        if (fp != NULL) {
+            fprintf(fp, "[RenPlay-CRASH] Uncaught ObjC exception: %s: %s\n%s\n",
+                    exception.name.UTF8String ?: "",
+                    exception.reason.UTF8String ?: "",
+                    exception.callStackSymbols.description.UTF8String ?: "");
+            fclose(fp);
+        }
+    }
+}
+
+static void renplay_signal_handler(int sig, siginfo_t *info, void *uap) {
+    (void)uap;
+    char msg[160];
+    int len = snprintf(msg, sizeof(msg),
+                       "\n[RenPlay-CRASH] Signal %d (%s) at addr=%p\n",
+                       sig, strsignal(sig) ?: "unknown",
+                       info ? info->si_addr : NULL);
+    if (len > 0) {
+        (void)write(STDERR_FILENO, msg, (size_t)len);
+    }
+    void *frames[64];
+    int n = backtrace(frames, 64);
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    raise(sig);
+}
+
+static void renplay_install_crash_handlers(void) {
+    NSSetUncaughtExceptionHandler(&renplay_uncaught_exception_handler);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = &renplay_signal_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigemptyset(&sa.sa_mask);
+    int signals[] = { SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE };
+    for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); ++i) {
+        sigaction(signals[i], &sa, NULL);
+    }
+}
+
 void renplay_install_sdl_scene_bridge(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        // Keep a direct symbol reference into MetalANGLE so ld64 does not strip it as unused.
+        volatile const void *maAnchor = (const void *)&glGetString;
+        (void)maAnchor;
+        renplay_install_crash_handlers();
         Class cls = [UIWindow class];
         Method m1 = class_getInstanceMethod(cls, @selector(makeKeyAndVisible));
         Method m2 = class_getInstanceMethod(cls, @selector(renplay_makeKeyAndVisible));
@@ -471,6 +523,23 @@ void renplay_install_sdl_scene_bridge(void) {
             method_exchangeImplementations(h1, h2);
         }
     });
+}
+
+int renplay_has_sdl_window(void) {
+    Class sdlWinCls = NSClassFromString(@"SDL_uikitwindow");
+    if (sdlWinCls == Nil) {
+        return 0;
+    }
+    UIWindowScene *scene = renplay_resolve_target_scene();
+    if (!scene) {
+        return 0;
+    }
+    for (UIWindow *win in scene.windows) {
+        if ([win isKindOfClass:sdlWinCls] && !win.hidden) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static void renplay_redirect_stdio(const char *logDir) {
@@ -598,6 +667,19 @@ int renplay_launch_engine(
     char argv0[2048];
     snprintf(argv0, sizeof(argv0), "%s/RenPlay", engineBaseDir);
     char *argv[] = { argv0, (char *)gameDir, NULL };
+
+    void *glSym = dlsym(RTLD_DEFAULT, "glGetString");
+    Dl_info glInfo;
+    if (glSym != NULL && dladdr(glSym, &glInfo) != 0 && glInfo.dli_fname != NULL) {
+        NSLog(@"[RenPlay] glGetString image: %s", glInfo.dli_fname);
+        if (g_log_file_path[0] != '\0') {
+            FILE *fp = fopen(g_log_file_path, "a");
+            if (fp != NULL) {
+                fprintf(fp, "[RenPlay] glGetString image: %s\n", glInfo.dli_fname);
+                fclose(fp);
+            }
+        }
+    }
 
     int rc = entry(2, argv);
     g_active_handle = NULL;
@@ -744,5 +826,6 @@ void renplay_send_key_press(int sdlKeycode, int sdlScancode) {
 }
 void renplay_toggle_text_input(void) {}
 const char *renplay_get_log_file_path(void) { return NULL; }
+int renplay_has_sdl_window(void) { return 0; }
 
 #endif

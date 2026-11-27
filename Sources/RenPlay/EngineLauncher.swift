@@ -31,6 +31,7 @@ public final class EngineLauncher {
     private let libraryStore: LibraryStore
     private let saveManager: SaveManager
     private var overlayWindow: GameOverlayWindow?
+    private var overlayPollTimer: Timer?
 
     public init(libraryStore: LibraryStore, saveManager: SaveManager) {
         self.libraryStore = libraryStore
@@ -130,18 +131,37 @@ public final class EngineLauncher {
         let overlayOpacity = appSettings.overlayOpacity
         let gameTitle = game.displayName
 
-        // Capture foreground UIWindowScene before hiding SwiftUI windows, then enter SDL outside Swift Task context.
+        // Capture foreground UIWindowScene and tear down SwiftUI windows before SDL creates its window.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             guard let self else { return }
             renplay_capture_window_scene()
-            if showOverlay {
-                self.installOverlay(gameName: gameTitle, logDir: logDir, opacity: overlayOpacity)
-            }
+            var savedWindows: [(UIWindow, UIViewController?)] = []
             for scene in UIApplication.shared.connectedScenes {
                 guard let ws = scene as? UIWindowScene else { continue }
                 for win in ws.windows where win !== self.overlayWindow {
+                    savedWindows.append((win, win.rootViewController))
+                    win.rootViewController = nil
                     win.isHidden = true
                 }
+            }
+
+            if showOverlay {
+                self.overlayPollTimer?.invalidate()
+                let timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] timer in
+                    guard let self else {
+                        timer.invalidate()
+                        return
+                    }
+                    if renplay_has_sdl_window() != 0 {
+                        timer.invalidate()
+                        MainActor.assumeIsolated {
+                            self.overlayPollTimer = nil
+                            self.installOverlay(gameName: gameTitle, logDir: logDir, opacity: overlayOpacity)
+                        }
+                    }
+                }
+                RunLoop.main.add(timer, forMode: .common)
+                self.overlayPollTimer = timer
             }
 
             var errBuf = [CChar](repeating: 0, count: 1024)
@@ -162,6 +182,8 @@ public final class EngineLauncher {
                 errBuf.count
             )
 
+            self.overlayPollTimer?.invalidate()
+            self.overlayPollTimer = nil
             self.removeOverlay()
             if rc == 0 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
@@ -170,12 +192,10 @@ public final class EngineLauncher {
                 return
             }
 
-            for scene in UIApplication.shared.connectedScenes {
-                guard let ws = scene as? UIWindowScene else { continue }
-                for win in ws.windows {
-                    win.isHidden = false
-                    win.makeKeyAndVisible()
-                }
+            for (win, rootVC) in savedWindows {
+                win.rootViewController = rootVC
+                win.isHidden = false
+                win.makeKeyAndVisible()
             }
 
             let utf8Bytes = errBuf.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
@@ -197,6 +217,8 @@ public final class EngineLauncher {
     }
 
     private func removeOverlay() {
+        overlayPollTimer?.invalidate()
+        overlayPollTimer = nil
         overlayWindow?.isHidden = true
         overlayWindow?.rootViewController = nil
         overlayWindow = nil
