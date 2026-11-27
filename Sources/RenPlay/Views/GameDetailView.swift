@@ -674,7 +674,7 @@ struct GameSettingsSheet: View {
                     set: { appState.updateGame($0) }
                 )
                 Form {
-                    Section("General") {
+                    Section {
                         Toggle("Safe Mode", isOn: binding.settings.safeMode)
                         Picker("Engine", selection: engineModeBinding(binding)) {
                             Text("Auto").tag("auto")
@@ -687,6 +687,10 @@ struct GameSettingsSheet: View {
                                 Text(pref.displayName).tag(pref)
                             }
                         }
+                    } header: {
+                        Text("General")
+                    } footer: {
+                        Text("Safe Mode enables low-memory defaults and disables compatibility patches, runtime overrides, and multi-touch gestures for this game.")
                     }
 
                     Section("Appearance") {

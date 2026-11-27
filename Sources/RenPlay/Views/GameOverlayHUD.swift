@@ -24,6 +24,7 @@ final class GameOverlayWindow: UIWindow {
         initialVariants: [String],
         screenshotDestMode: Int,
         initialGestures: GestureProfile,
+        isSafeMode: Bool,
         onPersistSettings: ((Double, Bool, Bool, Double, Int) -> Void)?,
         onPersistGestures: ((GestureProfile) -> Void)?
     ) {
@@ -41,6 +42,7 @@ final class GameOverlayWindow: UIWindow {
             initialVariants: initialVariants,
             screenshotDestMode: screenshotDestMode,
             initialGestures: initialGestures,
+            isSafeMode: isSafeMode,
             onPersistSettings: onPersistSettings,
             onPersistGestures: onPersistGestures
         )
@@ -137,6 +139,7 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
     private var selectedVariants: Set<String>
     private var screenshotDestMode: Int
     private var gestures: GestureProfile
+    private let isSafeMode: Bool
     private let onPersistSettings: ((Double, Bool, Bool, Double, Int) -> Void)?
     private let onPersistGestures: ((GestureProfile) -> Void)?
     private var selectedRotationMode: Int = Int(renplay_get_preferred_orientation())
@@ -182,6 +185,7 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         initialVariants: [String],
         screenshotDestMode: Int,
         initialGestures: GestureProfile,
+        isSafeMode: Bool,
         onPersistSettings: ((Double, Bool, Bool, Double, Int) -> Void)?,
         onPersistGestures: ((GestureProfile) -> Void)?
     ) {
@@ -204,6 +208,7 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         }
         self.screenshotDestMode = screenshotDestMode
         self.gestures = initialGestures
+        self.isSafeMode = isSafeMode
         self.onPersistSettings = onPersistSettings
         self.onPersistGestures = onPersistGestures
         let saved = UserDefaults.standard.stringArray(forKey: "renplay.savedVars.\(gameID.uuidString)") ?? []
@@ -1023,6 +1028,15 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
     private func buildGesturesModal() {
         modalHeaderIcon.image = UIImage(systemName: "hand.draw")
         modalTitleLabel.text = "Touch Gestures"
+
+        if isSafeMode {
+            let notice = UILabel()
+            notice.text = "Safe Mode is active for this game. Multi-touch gestures are inactive for this session."
+            notice.font = .systemFont(ofSize: 12, weight: .medium)
+            notice.textColor = .systemOrange
+            notice.numberOfLines = 0
+            modalBody.addArrangedSubview(notice)
+        }
 
         let enableSwitch = UISwitch()
         enableSwitch.isOn = gestures.isEnabled

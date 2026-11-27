@@ -12,7 +12,7 @@ RenPlay launches unmodified Ren'Py games inside an iOS/iPadOS process without JI
    - Syncs `base/main.py` and `base/renpy/common/99renplay_overrides.rpy` from `engineMainScript` / `runtimeOverridesScript` and deletes stale compiled `.pyc` / `.rpyc` / `.rpyb` files so edits apply cleanly.
    - Creates `Save`, `Log`, and shared `_Multipersistent` directories, removes stale `_reload-1.save` / `_reload-2.save` mobile suspend snapshots, and optionally writes a rotated ZIP backup (`autoBackupCount`).
    - If the game has an `SMBGameSource`, calls `renplay_configure_smb_mount(...)` to initialize `csmb_mount` before entering Python.
-   - Applies orientation (`renplay_set_preferred_orientation`) and multi-touch gesture configuration (`renplay_configure_gestures`).
+   - Applies orientation (`renplay_set_preferred_orientation`) and multi-touch gesture configuration (`renplay_configure_gestures`, skipped/forced off in Safe Mode).
    - Hides SwiftUI windows and schedules `renplay_launch_engine(...)` on `RunLoop.main` (`0.15s` timer) so UIKit keeps draining main-queue services while SDL runs.
 3. **Dynamic Framework Loading ([RenPlayBridge.m](../Sources/CRenPlayBridge/RenPlayBridge.m))**:
    - Redirects `stdout` and `stderr` to `<logDir>/renplay_session.log` and redirects stderr from `NSLog`/`os_log` visibility cleanly into the session log.
@@ -39,6 +39,6 @@ iOS scene-based apps require `UIWindow.windowScene` on newly created SDL windows
   - Installs Windows compatibility shims (`os.startfile`, `ctypes.windll` + `user32.GetSystemMetrics`) early if `RENPY_COMPAT_PATCHES=1` (and not Safe Mode).
 - [scripts/99renplay_overrides.rpy](../scripts/99renplay_overrides.rpy):
   - Runs at `init 999 python` (both Python 2.7 and Python 3.x compatible).
-  - Applies Safe Mode (`image_cache_size_mb = 64`, `gl_powersave = True`, `predict_statements = 0`) or normal switches (`developer`, `console`, `rollback_enabled`, `allow_skipping`, `preferences.skip_unseen`, `RENPY_COMPAT_PATCHES` backslash loader normalization, transparent textbox styling, `RENPY_MASTER_VOLUME`).
+  - Applies Safe Mode (`image_cache_size_mb = 64`, `gl_powersave = True`, `predict_statements = 0`, skipping `_renplay_keymap` underlay shortcuts and touch/input hooks) or normal switches (`developer`, `console`, `rollback_enabled`, `allow_skipping`, `preferences.skip_unseen`, `RENPY_COMPAT_PATCHES` backslash loader normalization, transparent textbox styling, `RENPY_MASTER_VOLUME`).
   - Handles screenshot callbacks (`_renplay_screenshot_callback` -> `renplay_bridge_on_screenshot_saved` when saving to Photos) and user-selected auto-load (`_renplay_check_load` + `main_menu` `FileLoad` fallback).
   - Registers `config.periodic_callbacks` (`_renplay_poll_bridge`) to drain frozen variable assignments, dialogue progress reporting, native key events, virtual mouse events, JSON RPC requests (`set_volume`, `set_transparent_textbox`, `open_console`, `reload_script`, `set_variants`, `unlock_gallery`, `list_vars`, `set_var`, `toggle_freeze`), and HUD/gesture commands.

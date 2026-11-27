@@ -176,7 +176,11 @@ public final class EngineLauncher {
         let orientationMode = Self.resolvedOrientationMode(game: game, appSettings: appSettings)
         renplay_set_preferred_orientation(orientationMode)
         let gestures = appSettings.gestures
-        Self.applyGestureProfile(gestures)
+        if safeMode {
+            renplay_configure_gestures(0, 0, 0, 0, 0, 0, 0)
+        } else {
+            Self.applyGestureProfile(gestures)
+        }
 
         let variant: String
         if overrideVariants && !selectedVariants.isEmpty {
@@ -250,7 +254,8 @@ public final class EngineLauncher {
                                 initialTransparentTextboxes: transparentTextboxes != 0,
                                 initialVariants: variant.split(separator: " ").map(String.init),
                                 screenshotDestMode: Int(screenshotMode),
-                                initialGestures: gestures
+                                initialGestures: gestures,
+                                isSafeMode: safeMode
                             )
                         }
                     }
@@ -352,7 +357,8 @@ public final class EngineLauncher {
         initialTransparentTextboxes: Bool,
         initialVariants: [String],
         screenshotDestMode: Int,
-        initialGestures: GestureProfile
+        initialGestures: GestureProfile,
+        isSafeMode: Bool
     ) {
         guard let scene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
@@ -376,6 +382,7 @@ public final class EngineLauncher {
             initialVariants: initialVariants,
             screenshotDestMode: screenshotDestMode,
             initialGestures: initialGestures,
+            isSafeMode: isSafeMode,
             onPersistSettings: { newOpacity, newFPS, newQuickBar, newMouseSpeed, newScreenshotMode in
                 var current = store.loadSettings()
                 current.overlayOpacity = newOpacity
@@ -386,7 +393,9 @@ public final class EngineLauncher {
                 try? store.saveSettings(current)
             },
             onPersistGestures: { newGestures in
-                Self.applyGestureProfile(newGestures)
+                if !isSafeMode {
+                    Self.applyGestureProfile(newGestures)
+                }
                 var current = store.loadSettings()
                 current.gestures = newGestures
                 try? store.saveSettings(current)
@@ -1211,32 +1220,33 @@ public final class EngineLauncher {
             except Exception:
                 pass
 
-        try:
-            for _ev_key in (
-                "renplay_save_menu",
-                "renplay_load_menu",
-                "renplay_history_menu",
-                "renplay_prefs_menu",
-                "renplay_quicksave",
-                "renplay_quickload",
-            ):
-                config.keymap.setdefault(_ev_key, [])
-                try:
-                    renpy.display.behavior.event_cache.pop(_ev_key, None)
-                except Exception:
-                    pass
-            _renplay_keymap = renpy.Keymap(
-                renplay_save_menu=lambda: _renplay_open_menu_screen("save"),
-                renplay_load_menu=lambda: _renplay_open_menu_screen("load"),
-                renplay_history_menu=lambda: _renplay_open_menu_screen("history"),
-                renplay_prefs_menu=lambda: _renplay_open_menu_screen("preferences"),
-                renplay_quicksave=QuickSave(),
-                renplay_quickload=QuickLoad(confirm=False),
-            )
-            if _renplay_keymap not in config.underlay:
-                config.underlay.append(_renplay_keymap)
-        except Exception:
-            pass
+        if not _renplay_safe_mode:
+            try:
+                for _ev_key in (
+                    "renplay_save_menu",
+                    "renplay_load_menu",
+                    "renplay_history_menu",
+                    "renplay_prefs_menu",
+                    "renplay_quicksave",
+                    "renplay_quickload",
+                ):
+                    config.keymap.setdefault(_ev_key, [])
+                    try:
+                        renpy.display.behavior.event_cache.pop(_ev_key, None)
+                    except Exception:
+                        pass
+                _renplay_keymap = renpy.Keymap(
+                    renplay_save_menu=lambda: _renplay_open_menu_screen("save"),
+                    renplay_load_menu=lambda: _renplay_open_menu_screen("load"),
+                    renplay_history_menu=lambda: _renplay_open_menu_screen("history"),
+                    renplay_prefs_menu=lambda: _renplay_open_menu_screen("preferences"),
+                    renplay_quicksave=QuickSave(),
+                    renplay_quickload=QuickLoad(confirm=False),
+                )
+                if _renplay_keymap not in config.underlay:
+                    config.underlay.append(_renplay_keymap)
+            except Exception:
+                pass
 
         _renplay_pg_mods = []
         try:
@@ -1808,16 +1818,22 @@ public final class EngineLauncher {
                     elif cmd == 6:
                         renpy.queue_event("screenshot")
                     elif cmd == 7:
-                        renpy.queue_event("renplay_quicksave")
+                        if _renplay_safe_mode:
+                            renpy.run(QuickSave())
+                        else:
+                            renpy.queue_event("renplay_quicksave")
                     elif cmd == 8:
-                        renpy.queue_event("renplay_quickload")
-                    elif cmd == 11:
+                        if _renplay_safe_mode:
+                            renpy.run(QuickLoad(confirm=False))
+                        else:
+                            renpy.queue_event("renplay_quickload")
+                    elif cmd == 11 and not _renplay_safe_mode:
                         renpy.queue_event("renplay_save_menu")
-                    elif cmd == 12:
+                    elif cmd == 12 and not _renplay_safe_mode:
                         renpy.queue_event("renplay_load_menu")
-                    elif cmd == 13:
+                    elif cmd == 13 and not _renplay_safe_mode:
                         renpy.queue_event("renplay_history_menu")
-                    elif cmd == 14:
+                    elif cmd == 14 and not _renplay_safe_mode:
                         renpy.queue_event("renplay_prefs_menu")
                 except _renplay_control_exceptions:
                     raise

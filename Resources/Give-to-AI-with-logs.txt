@@ -58,9 +58,9 @@ Check the shared files first:
      Global Ren'Py Options above; turn OFF to override them for this game
      only. Allow Network Access in Game Settings acts as an OR with
      Global Allow Network.
-   - Safe Mode forces RENPY_LESS_MEMORY=1 and disables Compatibility
-     Patches, Dev Mode, Console, Force Rollback/Skip, Variant overrides,
-     touch suppression hook, and editable input reopen hook.
+   - Safe Mode forces RENPY_LESS_MEMORY=1 and disables Multi-Touch
+     Gestures, Compatibility Patches, Dev Mode, Console, Force
+     Rollback/Skip, Variant overrides, and editable input reopen hook.
 3. In-Game Floating Overlay (tap floating dot button; long-press button to
    toggle Quick Bar):
    - Overlay Settings & Touch Gestures persist to settings.json right away.
@@ -142,8 +142,8 @@ UI toggles; players never edit env vars directly:
 - LAN (SMB) game fails after editing PC scripts:
   Game Page > More > Sync Scripts to refresh the SMB script index.
 - Accidental dialogue clicks while using 2- or 3-finger touch gestures:
-  Safe Mode disables the gesture touch-filter hook; turn OFF Safe Mode or
-  adjust Touch Gestures in Settings / HUD.
+  Safe Mode disables Multi-Touch Gestures completely; turn OFF Safe Mode
+  to use gestures, or adjust Touch Gestures in Settings / HUD.
 
 ==========================================================================
 6. READING THE LOGS

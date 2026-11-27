@@ -181,6 +181,7 @@ enum AIHelp {
             lines.append("Storage Mode: \(game.remoteSource != nil ? "network-share" : "local")")
             lines.append("Save Slots: \(saveCount)")
             lines.append("Safe Mode: \(game.settings.safeMode)")
+            lines.append("Touch Gestures Active: \(!game.settings.safeMode && appState.appSettings.gestures.isEnabled)")
             lines.append("Engine Mode: \(describeEngineMode(game.settings.engineMode))")
             lines.append("Screen Rotation: \(game.settings.screenRotation.rawValue)")
             lines.append("Use Global Settings: \(game.settings.useGlobalSettings)")

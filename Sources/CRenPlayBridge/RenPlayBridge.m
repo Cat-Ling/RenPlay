@@ -52,6 +52,7 @@ static int g_cmd_head = 0;
 static int g_cmd_tail = 0;
 
 static atomic_int g_pending_hud_toggle = 0;
+static atomic_int g_safe_mode_active = 0;
 static atomic_int g_gestures_enabled = 1;
 static atomic_int g_gesture_two_tap = RENPLAY_CMD_SAVE_MENU;
 static atomic_int g_gesture_three_tap = RENPLAY_CMD_HIDE_UI;
@@ -229,7 +230,7 @@ static int64_t renplay_monotonic_ms(void) {
 }
 
 - (void)dispatchCommand:(int)cmd {
-    if (cmd == RENPLAY_CMD_NONE || atomic_load(&g_gestures_enabled) == 0) {
+    if (cmd == RENPLAY_CMD_NONE || atomic_load(&g_safe_mode_active) != 0 || atomic_load(&g_gestures_enabled) == 0) {
         return;
     }
     int64_t now = renplay_monotonic_ms();
@@ -280,7 +281,7 @@ static int64_t renplay_monotonic_ms(void) {
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
-    if (atomic_load(&g_gestures_enabled) == 0) {
+    if (atomic_load(&g_safe_mode_active) != 0 || atomic_load(&g_gestures_enabled) == 0) {
         return NO;
     }
     if (touch.view != nil && [touch.view isKindOfClass:[UITextField class]]) {
@@ -297,10 +298,10 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
 @end
 
 static void renplay_attach_gestures_to_window(UIWindow *window) {
-    if (!window || objc_getAssociatedObject(window, &kRenPlayGesturesInstalledKey) != nil) {
+    if (!window || atomic_load(&g_safe_mode_active) != 0 ||
+        objc_getAssociatedObject(window, &kRenPlayGesturesInstalledKey) != nil) {
         return;
     }
-    objc_setAssociatedObject(window, &kRenPlayGesturesInstalledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     RenPlayGestureTarget *target = [RenPlayGestureTarget shared];
 
     UITapGestureRecognizer *twoTap = [[UITapGestureRecognizer alloc] initWithTarget:target action:@selector(handleTwoFingerTap:)];
@@ -337,8 +338,26 @@ static void renplay_attach_gestures_to_window(UIWindow *window) {
     }
     [twoTap requireGestureRecognizerToFail:threeTap];
 
+    BOOL enabled = (atomic_load(&g_gestures_enabled) != 0);
     for (UIGestureRecognizer *gr in recognizers) {
+        gr.enabled = enabled;
         [window addGestureRecognizer:gr];
+    }
+    objc_setAssociatedObject(window, &kRenPlayGesturesInstalledKey, [recognizers copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void renplay_sync_window_gesture_recognizers(BOOL enabled) {
+    UIWindow *window = renplay_find_game_window();
+    if (!window || !renplay_is_sdl_window_object(window)) {
+        return;
+    }
+    BOOL effectiveEnabled = enabled && (atomic_load(&g_safe_mode_active) == 0);
+    if (effectiveEnabled) {
+        renplay_attach_gestures_to_window(window);
+    }
+    NSArray<UIGestureRecognizer *> *recognizers = objc_getAssociatedObject(window, &kRenPlayGesturesInstalledKey);
+    for (UIGestureRecognizer *gr in recognizers) {
+        gr.enabled = effectiveEnabled;
     }
 }
 
@@ -352,7 +371,9 @@ static void renplay_attach_gestures_to_window(UIWindow *window) {
         }
     }
     [self renplay_makeKeyAndVisible];
-    if (renplay_is_sdl_window_object(self)) {
+    if (renplay_is_sdl_window_object(self) &&
+        atomic_load(&g_safe_mode_active) == 0 &&
+        atomic_load(&g_gestures_enabled) != 0) {
         renplay_attach_gestures_to_window(self);
     }
 }
@@ -365,7 +386,10 @@ static void renplay_attach_gestures_to_window(UIWindow *window) {
         }
     }
     [self renplay_setHidden:hidden];
-    if (!hidden && renplay_is_sdl_window_object(self)) {
+    if (!hidden &&
+        renplay_is_sdl_window_object(self) &&
+        atomic_load(&g_safe_mode_active) == 0 &&
+        atomic_load(&g_gestures_enabled) != 0) {
         renplay_attach_gestures_to_window(self);
     }
 }
@@ -381,20 +405,21 @@ static void renplay_attach_gestures_to_window(UIWindow *window) {
 }
 
 - (void)renplay_sendEvent:(UIEvent *)event {
-    if (event.type == UIEventTypeTouches && renplay_is_sdl_window_object(self)) {
+    if (event.type == UIEventTypeTouches &&
+        renplay_is_sdl_window_object(self) &&
+        atomic_load(&g_safe_mode_active) == 0 &&
+        atomic_load(&g_gestures_enabled) != 0) {
         renplay_attach_gestures_to_window(self);
-        if (atomic_load(&g_gestures_enabled) != 0) {
-            NSSet<UITouch *> *touches = [event touchesForWindow:self];
-            NSInteger activeCount = 0;
-            for (UITouch *touch in touches) {
-                if (touch.phase != UITouchPhaseEnded && touch.phase != UITouchPhaseCancelled) {
-                    activeCount++;
-                }
+        NSSet<UITouch *> *touches = [event touchesForWindow:self];
+        NSInteger activeCount = 0;
+        for (UITouch *touch in touches) {
+            if (touch.phase != UITouchPhaseEnded && touch.phase != UITouchPhaseCancelled) {
+                activeCount++;
             }
-            if (touches.count >= 2 || atomic_load(&g_multitouch_active) != 0) {
-                atomic_store(&g_multitouch_suppress_until_ms, renplay_monotonic_ms() + 220);
-                atomic_store(&g_multitouch_active, activeCount > 0 ? 1 : 0);
-            }
+        }
+        if (touches.count >= 2 || atomic_load(&g_multitouch_active) != 0) {
+            atomic_store(&g_multitouch_suppress_until_ms, renplay_monotonic_ms() + 220);
+            atomic_store(&g_multitouch_active, activeCount > 0 ? 1 : 0);
         }
     }
     [self renplay_sendEvent:event];
@@ -1346,6 +1371,10 @@ int renplay_launch_engine(
     setenv("RENPY_TRANSPARENT_TEXTBOX", transparentTextboxes ? "1" : "0", 1);
     setenv("RENPY_COMPAT_PATCHES", compatPatches ? "1" : "0", 1);
     setenv("RENPY_SAFE_MODE", safeMode ? "1" : "0", 1);
+    atomic_store(&g_safe_mode_active, safeMode ? 1 : 0);
+    if (safeMode) {
+        atomic_store(&g_gestures_enabled, 0);
+    }
     char volBuf[32];
     double clampedVol = masterVolume < 0.0 ? 0.0 : (masterVolume > 1.0 ? 1.0 : masterVolume);
     snprintf(volBuf, sizeof(volBuf), "%.2f", clampedVol);
@@ -1613,16 +1642,26 @@ void renplay_configure_gestures(
     int twoFingerSwipeUpCmd,
     int twoFingerSwipeDownCmd
 ) {
-    atomic_store(&g_gestures_enabled, enabled ? 1 : 0);
+    int effectiveEnabled = (enabled && atomic_load(&g_safe_mode_active) == 0) ? 1 : 0;
+    atomic_store(&g_gestures_enabled, effectiveEnabled);
     atomic_store(&g_gesture_two_tap, twoFingerTapCmd);
     atomic_store(&g_gesture_three_tap, threeFingerTapCmd);
     atomic_store(&g_gesture_swipe_left, twoFingerSwipeLeftCmd);
     atomic_store(&g_gesture_swipe_right, twoFingerSwipeRightCmd);
     atomic_store(&g_gesture_swipe_up, twoFingerSwipeUpCmd);
     atomic_store(&g_gesture_swipe_down, twoFingerSwipeDownCmd);
-    if (!enabled) {
+    if (!effectiveEnabled) {
         atomic_store(&g_multitouch_active, 0);
         atomic_store(&g_multitouch_suppress_until_ms, 0);
+    }
+    if ([NSThread isMainThread]) {
+        renplay_sync_window_gesture_recognizers(effectiveEnabled != 0);
+    } else {
+        CFRunLoopRef mainLoop = CFRunLoopGetMain();
+        CFRunLoopPerformBlock(mainLoop, kCFRunLoopCommonModes, ^{
+            renplay_sync_window_gesture_recognizers(effectiveEnabled != 0);
+        });
+        CFRunLoopWakeUp(mainLoop);
     }
 }
 
@@ -1632,7 +1671,7 @@ int renplay_consume_hud_toggle_request(void) {
 
 __attribute__((visibility("default"), used))
 int renplay_bridge_should_suppress_touch_mouse(void) {
-    if (atomic_load(&g_gestures_enabled) == 0) {
+    if (atomic_load(&g_safe_mode_active) != 0 || atomic_load(&g_gestures_enabled) == 0) {
         return 0;
     }
     if (atomic_load(&g_multitouch_active) != 0) {
