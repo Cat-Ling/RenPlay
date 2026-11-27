@@ -13,6 +13,9 @@ extern "C" {
 // Swizzles UIWindow presentation so SDL2/SDL3 windows automatically bind to the active UIWindowScene.
 void renplay_install_sdl_scene_bridge(void);
 
+// Captures the active foreground UIWindowScene before hiding launcher windows.
+void renplay_capture_window_scene(void);
+
 // Redirects stdout/stderr to <logDir>/renplay_session.log, loads the Ren'Py framework via dlopen,
 // configures RENPY_* environment variables, and launches the engine.
 // sdlVersionHint: 2 for SDL2, 3 for SDL3.

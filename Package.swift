@@ -34,6 +34,7 @@ let package = Package(
                 .linkedFramework("Foundation", .when(platforms: [.iOS])),
                 .linkedFramework("AVFoundation", .when(platforms: [.iOS])),
                 .linkedFramework("QuartzCore", .when(platforms: [.iOS])),
+                .linkedFramework("StoreKit", .when(platforms: [.iOS])),
             ]
         ),
         .target(

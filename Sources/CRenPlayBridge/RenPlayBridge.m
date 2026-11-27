@@ -8,6 +8,7 @@
 @import UIKit;
 @import Foundation;
 @import AVFoundation;
+@import StoreKit;
 
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -23,6 +24,7 @@ static int g_active_sdl_version = 2;
 static char g_log_file_path[2048] = {0};
 static char g_loaded_framework[2048] = {0};
 static int g_text_input_active = 0;
+static __weak UIWindowScene *g_target_window_scene = nil;
 
 static UIWindowScene *renplay_find_foreground_scene(void) {
     UISceneActivationState states[] = {
@@ -44,8 +46,20 @@ static UIWindowScene *renplay_find_foreground_scene(void) {
     return nil;
 }
 
+static UIWindowScene *renplay_resolve_target_scene(void) {
+    UIWindowScene *captured = g_target_window_scene;
+    if (captured != nil) {
+        return captured;
+    }
+    return renplay_find_foreground_scene();
+}
+
+void renplay_capture_window_scene(void) {
+    g_target_window_scene = renplay_find_foreground_scene();
+}
+
 static UIWindow *renplay_find_game_window(void) {
-    UIWindowScene *scene = renplay_find_foreground_scene();
+    UIWindowScene *scene = renplay_resolve_target_scene();
     if (!scene) {
         return nil;
     }
@@ -64,11 +78,30 @@ static UIWindow *renplay_find_game_window(void) {
     return fallback;
 }
 
+static UIViewController *renplay_find_presenter(UIWindow *window) {
+    UIViewController *controller = window.rootViewController;
+    while (controller) {
+        if (controller.presentedViewController) {
+            controller = controller.presentedViewController;
+        } else if ([controller isKindOfClass:UINavigationController.class] &&
+                   ((UINavigationController *)controller).visibleViewController) {
+            controller = ((UINavigationController *)controller).visibleViewController;
+        } else if ([controller isKindOfClass:UITabBarController.class] &&
+                   ((UITabBarController *)controller).selectedViewController) {
+            controller = ((UITabBarController *)controller).selectedViewController;
+        } else {
+            return controller;
+        }
+    }
+    return nil;
+}
+
 @implementation UIWindow (RenPlaySDLScene)
 
 - (void)renplay_makeKeyAndVisible {
-    if (self.windowScene == nil) {
-        UIWindowScene *scene = renplay_find_foreground_scene();
+    Class sdlWinCls = NSClassFromString(@"SDL_uikitwindow");
+    if (sdlWinCls != Nil && [self isKindOfClass:sdlWinCls] && self.windowScene == nil) {
+        UIWindowScene *scene = renplay_resolve_target_scene();
         if (scene != nil) {
             self.windowScene = scene;
         }
@@ -77,8 +110,9 @@ static UIWindow *renplay_find_game_window(void) {
 }
 
 - (void)renplay_setHidden:(BOOL)hidden {
-    if (!hidden && self.windowScene == nil) {
-        UIWindowScene *scene = renplay_find_foreground_scene();
+    Class sdlWinCls = NSClassFromString(@"SDL_uikitwindow");
+    if (!hidden && sdlWinCls != Nil && [self isKindOfClass:sdlWinCls] && self.windowScene == nil) {
+        UIWindowScene *scene = renplay_resolve_target_scene();
         if (scene != nil) {
             self.windowScene = scene;
         }
@@ -205,6 +239,223 @@ static UIWindow *renplay_find_game_window(void) {
 
 @end
 
+@interface IAPHelper : NSObject <SKProductsRequestDelegate, SKPaymentTransactionObserver>
+@property NSArray *productIdentifiers;
+@property NSMutableDictionary *products;
+@property int initialized_queue;
+@property int validated;
+@property int finished;
+@property NSMutableSet *purchased;
+@property NSMutableSet *deferred;
+@property NSString *dialogTitle;
+- (id)init;
+- (void)initQueue;
+- (BOOL)canMakePayments;
+- (void)validateProductIdentifiersInBackground;
+- (void)validateProductIdentifiers;
+- (void)beginPurchase:(NSString *)identifier;
+- (void)restorePurchases;
+- (BOOL)hasPurchased:(NSString *)identifier;
+- (BOOL)hasPurchasedConsumable:(NSString *)identifier;
+- (BOOL)isDeferred:(NSString *)identifier;
+- (NSString *)formatPrice:(NSString *)identifier;
+- (void)requestReview;
+- (BOOL)showDialog;
+@end
+
+@implementation IAPHelper {
+    UIAlertController *_alert;
+}
+
+- (id)init {
+    self = [super init];
+    if (!self) return nil;
+    _products = [[NSMutableDictionary alloc] init];
+    _purchased = [[NSMutableSet alloc] init];
+    _deferred = [[NSMutableSet alloc] init];
+    _validated = 0;
+    _finished = 1;
+    _initialized_queue = 0;
+    _dialogTitle = @"Contacting App Store\nPlease Wait...";
+    return self;
+}
+
+- (void)initQueue {
+    if (self.initialized_queue) return;
+    [[SKPaymentQueue defaultQueue] addTransactionObserver:self];
+    self.initialized_queue = 1;
+}
+
+- (BOOL)canMakePayments {
+    [self initQueue];
+    return [SKPaymentQueue canMakePayments];
+}
+
+- (void)validateProductIdentifiers {
+    if (self.validated || ![self showDialog]) {
+        self.finished = 1;
+        return;
+    }
+    SKProductsRequest *req = [[SKProductsRequest alloc]
+        initWithProductIdentifiers:[NSSet setWithArray:self.productIdentifiers ?: @[]]];
+    self.finished = 0;
+    req.delegate = self;
+    [req start];
+}
+
+- (void)validateProductIdentifiersInBackground {
+    SKProductsRequest *req = [[SKProductsRequest alloc]
+        initWithProductIdentifiers:[NSSet setWithArray:self.productIdentifiers ?: @[]]];
+    self.validated = 0;
+    req.delegate = self;
+    [req start];
+}
+
+- (void)productsRequest:(SKProductsRequest *)request didReceiveResponse:(SKProductsResponse *)response {
+    for (SKProduct *prod in response.products) {
+        [self.products setObject:prod forKey:prod.productIdentifier];
+    }
+    [self hideDialog];
+    self.validated = 1;
+    self.finished = 1;
+}
+
+- (BOOL)showDialog {
+    if (_alert != nil) return YES;
+    UIViewController *presenter = renplay_find_presenter(renplay_find_game_window());
+    if (!presenter || !presenter.view.window || presenter.isBeingDismissed) {
+        return NO;
+    }
+    _alert = [UIAlertController alertControllerWithTitle:self.dialogTitle
+                                                 message:nil
+                                          preferredStyle:UIAlertControllerStyleAlert];
+    [presenter presentViewController:_alert animated:YES completion:nil];
+    return YES;
+}
+
+- (void)hideDialog {
+    if (_alert != nil) {
+        [_alert dismissViewControllerAnimated:YES completion:nil];
+        _alert = nil;
+    }
+}
+
+- (void)beginPurchase:(NSString *)identifier {
+    [self initQueue];
+    SKProduct *product = [self.products objectForKey:identifier];
+    if (!product || ![self showDialog]) {
+        self.finished = 1;
+        return;
+    }
+    self.finished = 0;
+    SKMutablePayment *payment = [SKMutablePayment paymentWithProduct:product];
+    payment.quantity = 1;
+    [[SKPaymentQueue defaultQueue] addPayment:payment];
+}
+
+- (void)restorePurchases {
+    if (![self showDialog]) {
+        self.finished = 1;
+        return;
+    }
+    [self initQueue];
+    self.finished = 0;
+    [[SKPaymentQueue defaultQueue] restoreCompletedTransactions];
+}
+
+- (void)paymentQueue:(SKPaymentQueue *)queue updatedTransactions:(NSArray *)transactions {
+    for (SKPaymentTransaction *t in transactions) {
+        NSString *identifier = t.payment.productIdentifier;
+        switch (t.transactionState) {
+            case SKPaymentTransactionStatePurchased:
+                [self.deferred removeObject:identifier];
+                [self.purchased addObject:identifier];
+                [[SKPaymentQueue defaultQueue] finishTransaction:t];
+                [self hideDialog];
+                self.finished = 1;
+                break;
+            case SKPaymentTransactionStateFailed:
+                [[SKPaymentQueue defaultQueue] finishTransaction:t];
+                [self hideDialog];
+                self.finished = 1;
+                break;
+            case SKPaymentTransactionStateRestored:
+                [self.deferred removeObject:identifier];
+                [self.purchased addObject:identifier];
+                [[SKPaymentQueue defaultQueue] finishTransaction:t];
+                break;
+            case SKPaymentTransactionStatePurchasing:
+                break;
+            case SKPaymentTransactionStateDeferred:
+                [self.deferred addObject:identifier];
+                [self hideDialog];
+                self.finished = 1;
+                break;
+        }
+    }
+}
+
+- (void)paymentQueue:(SKPaymentQueue *)queue restoreCompletedTransactionsFailedWithError:(NSError *)error {
+    [self hideDialog];
+    self.finished = 1;
+}
+
+- (void)paymentQueueRestoreCompletedTransactionsFinished:(SKPaymentQueue *)queue {
+    [self hideDialog];
+    self.finished = 1;
+}
+
+- (BOOL)hasPurchased:(NSString *)identifier {
+    return [self.purchased member:identifier] != nil;
+}
+
+- (BOOL)hasPurchasedConsumable:(NSString *)identifier {
+    BOOL res = [self.purchased member:identifier] != nil;
+    [self.purchased removeObject:identifier];
+    return res;
+}
+
+- (BOOL)isDeferred:(NSString *)identifier {
+    return [self.deferred member:identifier] != nil;
+}
+
+- (NSString *)formatPrice:(NSString *)identifier {
+    SKProduct *product = [self.products objectForKey:identifier];
+    if (!product) return nil;
+    NSNumberFormatter *fmt = [[NSNumberFormatter alloc] init];
+    [fmt setFormatterBehavior:NSNumberFormatterBehavior10_4];
+    [fmt setNumberStyle:NSNumberFormatterCurrencyStyle];
+    [fmt setLocale:product.priceLocale];
+    return [fmt stringFromNumber:product.price];
+}
+
+- (void)requestReview {
+    UIWindow *window = renplay_find_game_window();
+    if (window.windowScene) {
+        [SKStoreReviewController requestReviewInScene:window.windowScene];
+    }
+}
+
+@end
+
+@interface Age : NSObject
++ (BOOL)requested;
++ (BOOL)inProgress;
++ (BOOL)valid;
++ (NSInteger)ageLower;
++ (NSInteger)ageUpper;
++ (void)requestAgeRange;
+@end
+
+@implementation Age
++ (BOOL)requested { return NO; }
++ (BOOL)inProgress { return NO; }
++ (BOOL)valid { return NO; }
++ (NSInteger)ageLower { return -1; }
++ (NSInteger)ageUpper { return 150; }
++ (void)requestAgeRange {}
+@end
+
 void renplay_install_sdl_scene_bridge(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -290,7 +541,26 @@ int renplay_launch_engine(
         return -4;
     }
 
-    void *handle = dlopen(frameworkPath, RTLD_NOW | RTLD_LOCAL);
+    // Preload MetalANGLE with RTLD_GLOBAL so SDL_GL_GetProcAddress (dlsym(RTLD_DEFAULT, ...)) resolves GLES symbols.
+    const char *fwDirMarker = strstr(frameworkPath, "/Frameworks/");
+    if (fwDirMarker != NULL) {
+        size_t prefixLen = (size_t)(fwDirMarker - frameworkPath) + strlen("/Frameworks/");
+        char metalAnglePath[2048];
+        if (prefixLen + strlen("MetalANGLE.framework/MetalANGLE") < sizeof(metalAnglePath)) {
+            memcpy(metalAnglePath, frameworkPath, prefixLen);
+            strcpy(metalAnglePath + prefixLen, "MetalANGLE.framework/MetalANGLE");
+            void *maHandle = dlopen(metalAnglePath, RTLD_NOW | RTLD_GLOBAL);
+            if (maHandle == NULL) {
+                const char *err = dlerror();
+                if (errorBuf && errorBufSize > 0) {
+                    snprintf(errorBuf, errorBufSize, "MetalANGLE dlopen failed: %s", err ? err : "unknown error");
+                }
+                return -2;
+            }
+        }
+    }
+
+    void *handle = dlopen(frameworkPath, RTLD_NOW | RTLD_GLOBAL);
     if (handle == NULL) {
         const char *err = dlerror();
         if (errorBuf && errorBufSize > 0) {
@@ -299,6 +569,13 @@ int renplay_launch_engine(
         return -2;
     }
     snprintf(g_loaded_framework, sizeof(g_loaded_framework), "%s", frameworkPath);
+
+    typedef int (*SDLSetHintFn)(const char *name, const char *value);
+    SDLSetHintFn setHint = (SDLSetHintFn)dlsym(handle, "SDL_SetHint");
+    if (setHint != NULL) {
+        setHint("SDL_IOS_HIDE_HOME_INDICATOR", "1");
+        setHint("SDL_IOS_IDLE_TIMER_DISABLED", "1");
+    }
 
     typedef int (*EntryFn)(int, char **);
     EntryFn entry = (EntryFn)dlsym(handle, "renplay_launch");
@@ -425,6 +702,7 @@ void renplay_toggle_text_input(void) {
 #else
 
 void renplay_install_sdl_scene_bridge(void) {}
+void renplay_capture_window_scene(void) {}
 
 int renplay_launch_engine(
     const char *frameworkPath,

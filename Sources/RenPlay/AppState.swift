@@ -171,8 +171,11 @@ public final class AppState {
                     Task { @MainActor in
                         self.launchStatus = status
                     }
+                } onFailure: { msg in
+                    self.isLaunching = false
+                    self.launchStatus = ""
+                    self.activeError = msg
                 }
-                isLaunching = false
             } catch {
                 isLaunching = false
                 launchStatus = ""

@@ -68,7 +68,8 @@ public final class EngineLauncher {
         game: GameEntry,
         engine: EngineInfo,
         appSettings: AppSettings,
-        statusUpdate: @escaping @Sendable (String) -> Void
+        statusUpdate: @escaping @Sendable (String) -> Void,
+        onFailure: @MainActor @escaping (String) -> Void
     ) async throws {
         let fm = FileManager.default
         let engineRoot = cachedEnginesDirectory.appendingPathComponent(engine.version, isDirectory: true)
@@ -108,7 +109,6 @@ public final class EngineLauncher {
         }
 
         statusUpdate("Starting \(game.displayName)...")
-        try await Task.sleep(for: .milliseconds(120))
 
         let variant: String
         switch game.settings.orientation {
@@ -120,65 +120,68 @@ public final class EngineLauncher {
             variant = "portrait touch"
         }
 
-        if appSettings.showOverlayByDefault {
-            // Defer overlay window insertion one runloop turn so SwiftUI appearance transitions settle.
-            let name = game.displayName
-            let opacity = appSettings.overlayOpacity
-            DispatchQueue.main.async { [weak self] in
-                self?.installOverlay(gameName: name, logDir: logDir, opacity: opacity)
-            }
-        }
-
-        // Hide the SwiftUI root window so SDL's UIWindow becomes key cleanly.
-        for scene in UIApplication.shared.connectedScenes {
-            guard let ws = scene as? UIWindowScene else { continue }
-            for win in ws.windows where win !== overlayWindow {
-                win.isHidden = true
-            }
-        }
-
         let sdlVersion = engine.sdlVersion.uppercased().contains("3") ? 3 : 2
         let allowNetwork = (game.settings.allowNetwork || appSettings.globalAllowNetwork) ? 1 : 0
-        var errBuf = [CChar](repeating: 0, count: 1024)
+        let devMode = game.settings.developerMode ? 1 : 0
+        let forceRollback = game.settings.forceRollback ? 1 : 0
+        let forceSkip = game.settings.forceSkip ? 1 : 0
+        let lessMemory = game.settings.lowMemoryMode ? 1 : 0
+        let showOverlay = appSettings.showOverlayByDefault
+        let overlayOpacity = appSettings.overlayOpacity
+        let gameTitle = game.displayName
 
-        let rc = renplay_launch_engine(
-            fwURL.path,
-            engineRoot.path,
-            gameDir.path,
-            saveDir.path,
-            logDir.path,
-            variant,
-            Int32(sdlVersion),
-            Int32(allowNetwork),
-            game.settings.developerMode ? 1 : 0,
-            game.settings.forceRollback ? 1 : 0,
-            game.settings.forceSkip ? 1 : 0,
-            game.settings.lowMemoryMode ? 1 : 0,
-            &errBuf,
-            errBuf.count
-        )
-
-        removeOverlay()
-        if rc == 0 {
-            // Reset process after a normal engine exit so a subsequent launch cannot collide on SDL ObjC classes.
-            try? await Task.sleep(for: .milliseconds(150))
-            Darwin.exit(0)
-        }
-
-        for scene in UIApplication.shared.connectedScenes {
-            guard let ws = scene as? UIWindowScene else { continue }
-            for win in ws.windows {
-                win.isHidden = false
-                win.makeKeyAndVisible()
+        // Capture foreground UIWindowScene before hiding SwiftUI windows, then enter SDL outside Swift Task context.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            renplay_capture_window_scene()
+            if showOverlay {
+                self.installOverlay(gameName: gameTitle, logDir: logDir, opacity: overlayOpacity)
             }
-        }
+            for scene in UIApplication.shared.connectedScenes {
+                guard let ws = scene as? UIWindowScene else { continue }
+                for win in ws.windows where win !== self.overlayWindow {
+                    win.isHidden = true
+                }
+            }
 
-        let utf8Bytes = errBuf.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
-        let msg = String(decoding: utf8Bytes, as: UTF8.self)
-        if !msg.isEmpty {
-            throw LaunchError.engineFailure(msg)
+            var errBuf = [CChar](repeating: 0, count: 1024)
+            let rc = renplay_launch_engine(
+                fwURL.path,
+                engineRoot.path,
+                gameDir.path,
+                saveDir.path,
+                logDir.path,
+                variant,
+                Int32(sdlVersion),
+                Int32(allowNetwork),
+                Int32(devMode),
+                Int32(forceRollback),
+                Int32(forceSkip),
+                Int32(lessMemory),
+                &errBuf,
+                errBuf.count
+            )
+
+            self.removeOverlay()
+            if rc == 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    Darwin.exit(0)
+                }
+                return
+            }
+
+            for scene in UIApplication.shared.connectedScenes {
+                guard let ws = scene as? UIWindowScene else { continue }
+                for win in ws.windows {
+                    win.isHidden = false
+                    win.makeKeyAndVisible()
+                }
+            }
+
+            let utf8Bytes = errBuf.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
+            let msg = String(decoding: utf8Bytes, as: UTF8.self)
+            onFailure(msg.isEmpty ? "Engine exited with code \(rc). Check Session Logs for details." : msg)
         }
-        throw LaunchError.engineFailure("Engine exited with code \(rc). Check Session Logs for details.")
     }
 
     private func installOverlay(gameName: String, logDir: URL, opacity: Double) {
