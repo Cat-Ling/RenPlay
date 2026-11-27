@@ -113,7 +113,7 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var importMenuItems: some View {
-        Button("Import Archive (.zip / .apk / .tar.gz)", systemImage: "doc.zipper") {
+        Button("Import Archive (.zip / .7z / .rar / .apk / .tar.*)", systemImage: "doc.zipper") {
             activePickerMode = .archiveCopy
         }
         Button("Import Archive (In-Place / LiveContainer)", systemImage: "externaldrive.badge.plus") {
@@ -138,7 +138,7 @@ struct LibraryView: View {
         ContentUnavailableView {
             Label("No Visual Novels", systemImage: "book.closed")
         } description: {
-            Text("Import a Ren'Py .zip, .apk, .tar.gz, or folder, use Wi-Fi Browser Upload, or drop files into Files > On My iPhone > RenPlay.")
+            Text("Import a Ren'Py .zip, .7z, .rar, .apk, .tar.xz, .tar.zst, or folder, use Wi-Fi Browser Upload, or drop files into Files > On My iPhone > RenPlay.")
         } actions: {
             Menu("Import Game") {
                 importMenuItems

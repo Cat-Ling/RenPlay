@@ -20,11 +20,21 @@ let package = Package(
             targets: ["RenPlay"]
         ),
     ],
+    dependencies: [
+        .package(url: "https://github.com/facebook/zstd.git", exact: "1.5.7"),
+    ],
     targets: [
         .target(
             name: "CZlib",
+            dependencies: [
+                .product(name: "libzstd", package: "zstd"),
+            ],
             linkerSettings: [
                 .linkedLibrary("z"),
+                .linkedLibrary("bz2", .when(platforms: [.iOS, .macOS])),
+                .linkedLibrary("lzma", .when(platforms: [.iOS, .macOS])),
+                .linkedLibrary("archive", .when(platforms: [.iOS, .macOS])),
+                .linkedLibrary("dl", .when(platforms: [.linux])),
             ]
         ),
         .target(

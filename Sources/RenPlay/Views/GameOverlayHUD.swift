@@ -37,6 +37,7 @@ private final class GameOverlayViewController: UIViewController {
     private let overlayAlpha: CGFloat
 
     private let toggleButton = UIButton(type: .system)
+    private let keyboardPillButton = UIButton(type: .system)
     private let menuCard = UIView()
     private let menuStack = UIStackView()
     private let exitButton = UIButton(type: .system)
@@ -56,6 +57,7 @@ private final class GameOverlayViewController: UIViewController {
     private var panStartOrigin: CGPoint = .zero
     private var isMenuOpen = false
     private var isConfirmingExit = false
+    nonisolated(unsafe) private var keyboardPollTimer: Timer?
 
     init(gameName: String, logDir: URL, opacity: Double) {
         self.gameName = gameName
@@ -79,8 +81,20 @@ private final class GameOverlayViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         setupToggleButton()
+        setupKeyboardPillButton()
         setupMenuCard()
         setupLogCard()
+        startKeyboardPillTimer()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        keyboardPollTimer?.invalidate()
+        keyboardPollTimer = nil
+    }
+
+    deinit {
+        keyboardPollTimer?.invalidate()
     }
 
     override func viewDidLayoutSubviews() {
@@ -107,6 +121,9 @@ private final class GameOverlayViewController: UIViewController {
         if expandedToggleRect.contains(point) {
             return toggleButton
         }
+        if !keyboardPillButton.isHidden && keyboardPillButton.frame.insetBy(dx: -4, dy: -4).contains(point) {
+            return keyboardPillButton
+        }
         return nil
     }
 
@@ -132,6 +149,52 @@ private final class GameOverlayViewController: UIViewController {
         toggleButton.addGestureRecognizer(pan)
 
         view.addSubview(toggleButton)
+    }
+
+    private func setupKeyboardPillButton() {
+        var config = UIButton.Configuration.filled()
+        config.title = "Keyboard"
+        config.image = UIImage(systemName: "keyboard")
+        config.imagePadding = 6
+        config.baseBackgroundColor = UIColor(white: 0.08, alpha: max(overlayAlpha, 0.78))
+        config.baseForegroundColor = .white
+        config.background.cornerRadius = 18
+        config.background.strokeColor = UIColor.white.withAlphaComponent(0.28)
+        config.background.strokeWidth = 1
+        config.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12)
+        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+            var copy = incoming
+            copy.font = .systemFont(ofSize: 12, weight: .semibold)
+            return copy
+        }
+        keyboardPillButton.configuration = config
+        keyboardPillButton.isHidden = true
+        keyboardPillButton.addAction(
+            UIAction { _ in
+                renplay_show_keyboard_from_ui()
+            },
+            for: .touchUpInside
+        )
+        view.addSubview(keyboardPillButton)
+    }
+
+    private func startKeyboardPillTimer() {
+        keyboardPollTimer?.invalidate()
+        weak let weakPill = keyboardPillButton
+        let timer = Timer(timeInterval: 0.25, repeats: true) { timer in
+            guard let pill = weakPill else {
+                timer.invalidate()
+                return
+            }
+            MainActor.assumeIsolated {
+                let shouldShow = renplay_should_show_keyboard_pill() != 0
+                if pill.isHidden == shouldShow {
+                    pill.isHidden = !shouldShow
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        keyboardPollTimer = timer
     }
 
     private func setupMenuCard() {
@@ -171,7 +234,7 @@ private final class GameOverlayViewController: UIViewController {
             ("Auto Forward", "play.circle", Int32(RENPLAY_CMD_AUTO_FORWARD), true),
             ("Hide Dialogue", "eye.slash", Int32(RENPLAY_CMD_HIDE_UI), true),
             ("Screenshot", "camera", Int32(RENPLAY_CMD_SCREENSHOT), true),
-            ("Keyboard", "keyboard", Int32(RENPLAY_CMD_TOGGLE_KEYBOARD), false),
+            ("Keyboard", "keyboard", Int32(RENPLAY_CMD_TOGGLE_KEYBOARD), true),
         ]
 
         for (title, symbol, command, shouldCollapse) in actions {
@@ -462,6 +525,16 @@ private final class GameOverlayViewController: UIViewController {
         guard bounds.width > 0, bounds.height > 0 else { return }
 
         toggleButton.frame = CGRect(origin: buttonOrigin, size: CGSize(width: 44, height: 44))
+
+        let pillSize = keyboardPillButton.sizeThatFits(CGSize(width: 160, height: 36))
+        let pillW = max(pillSize.width, 102)
+        let pillH: CGFloat = 36
+        var pillX = toggleButton.frame.maxX + 8
+        if pillX + pillW > bounds.width - 8 {
+            pillX = max(8, toggleButton.frame.minX - pillW - 8)
+        }
+        let pillY = buttonOrigin.y + (44 - pillH) * 0.5
+        keyboardPillButton.frame = CGRect(x: pillX, y: pillY, width: pillW, height: pillH)
 
         let menuWidth: CGFloat = 200
         let fitSize = menuCard.systemLayoutSizeFitting(

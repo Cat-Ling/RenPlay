@@ -56,7 +56,7 @@ public final class LibraryStore: @unchecked Sendable {
             let instructions = """
             RenPlay Import & File Access
             ----------------------------
-            Drop .zip, .apk, .tar, .tar.gz archives or unpacked Ren'Py game folders into:
+            Drop .zip, .7z, .rar, .apk, .tar.gz, .tar.xz, .tar.zst, .tar.bz2 archives or unpacked Ren'Py game folders into:
             - Documents/Import/
             - Documents/ (this folder)
             - Documents/RenPlay/Import/
@@ -158,7 +158,7 @@ public final class LibraryStore: @unchecked Sendable {
         try ArchiveExtractor.extractArchive(at: archiveURL, to: staging, progress: progress)
         let gameRoot = ArchiveExtractor.locateGameRoot(inside: staging)
 
-        let rawTitle = preferredName ?? archiveURL.deletingPathExtension().lastPathComponent
+        let rawTitle = preferredName ?? ArchiveExtractor.stripArchiveExtension(from: archiveURL.lastPathComponent)
         let folderName = uniqueFolderName(base: sanitizeFolderName(rawTitle))
         let finalDir = gamesDir.appendingPathComponent(folderName, isDirectory: true)
         try fm.moveItem(at: gameRoot, to: finalDir)
@@ -243,7 +243,6 @@ public final class LibraryStore: @unchecked Sendable {
     ) throws -> Int {
         ensureDirectories()
         let fm = FileManager.default
-        let archiveExts: Set<String> = ["zip", "apk", "tar", "tgz", "gz"]
         let reservedDirNames: Set<String> = ["renplay", "import", "exports", "inbox"]
         var importedCount = 0
 
@@ -276,7 +275,7 @@ public final class LibraryStore: @unchecked Sendable {
                         try? fm.removeItem(at: item)
                         importedCount += 1
                     }
-                } else if archiveExts.contains(item.pathExtension.lowercased()) {
+                } else if ArchiveExtractor.isSupportedArchive(item) {
                     _ = try importGameArchive(from: item, progress: progress)
                     try? fm.removeItem(at: item)
                     importedCount += 1
@@ -291,7 +290,7 @@ public final class LibraryStore: @unchecked Sendable {
         )) ?? []
         for item in gameTopItems {
             let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-            if !isDir && archiveExts.contains(item.pathExtension.lowercased()) {
+            if !isDir && ArchiveExtractor.isSupportedArchive(item) {
                 _ = try importGameArchive(from: item, progress: progress)
                 try? fm.removeItem(at: item)
                 importedCount += 1
@@ -359,6 +358,9 @@ public final class LibraryStore: @unchecked Sendable {
             menu:
                 "Test Save & Rollback":
                     e "Rollback and skip work from the floating RenPlay overlay."
+                "Test Text Input":
+                    $ entered_name = renpy.input("Enter your name:", default="Traveler")
+                    e "Hello, [entered_name]! You can hide and reopen the keyboard anytime."
                 "Check Platform":
                     python:
                         import sys, renpy

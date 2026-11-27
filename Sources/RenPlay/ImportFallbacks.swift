@@ -502,7 +502,7 @@ final class LocalWiFiUploadServer {
     </head>
     <body>
       <h2>RenPlay Wi-Fi Upload</h2>
-      <p>Upload a Ren'Py game archive (<code>.zip</code>, <code>.apk</code>, <code>.tar.gz</code>) directly into RenPlay.</p>
+      <p>Upload a Ren'Py game archive (<code>.zip</code>, <code>.7z</code>, <code>.rar</code>, <code>.apk</code>, <code>.tar.xz</code>, <code>.tar.zst</code>, <code>.tar.gz</code>) directly into RenPlay.</p>
       <div class="box">
         <input id="file" type="file" multiple>
         <br>
@@ -626,7 +626,7 @@ struct URLDownloadSheetView: View {
                 } header: {
                     Text("Direct Archive URL")
                 } footer: {
-                    Text("Supports direct http/https links to .zip, .apk, .tar, or .tar.gz archives.")
+                    Text("Supports direct http/https links to .zip, .7z, .rar, .apk, .tar.xz, .tar.zst, or .tar.gz archives.")
                 }
 
                 Section {

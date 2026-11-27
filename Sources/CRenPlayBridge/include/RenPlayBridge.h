@@ -62,6 +62,15 @@ void renplay_send_key_press(int sdlKeycode, int sdlScancode);
 // Toggles SDL on-screen text input on the active engine handle.
 void renplay_toggle_text_input(void);
 
+// Returns 1 if the native iOS keyboard is currently active, 0 otherwise.
+int renplay_is_keyboard_visible(void);
+
+// Returns 1 when an in-game text input is active and the user hid the keyboard.
+int renplay_should_show_keyboard_pill(void);
+
+// Explicitly shows the native keyboard from the HUD reopen pill.
+void renplay_show_keyboard_from_ui(void);
+
 // Returns the path of the active session log file, or NULL if not launched.
 const char *renplay_get_log_file_path(void);
 

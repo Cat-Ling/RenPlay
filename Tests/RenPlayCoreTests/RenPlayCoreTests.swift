@@ -189,6 +189,191 @@ struct ArchiveExtractorTests {
             _ = try ArchiveExtractor.sanitizeRelativePath("/abs/path")
         }
     }
+
+    @Test("Extracts ZIP64 and Zstandard method 93 ZIP entries without full RAM buffering")
+    func zip64AndZstdZip() throws {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let zipURL = dir.appendingPathComponent("modern_z64.zip")
+        let scriptText = String(repeating: "label start:\n    \"Modern ZIP64 + Zstd test payload.\"\n", count: 64)
+        let rawData = Data(scriptText.utf8)
+        let zstdCompressed = try ZlibCodec.zstdCompress(rawData)
+        let nameData = Data("game/script.rpy".utf8)
+        let crc = ZlibCodec.crc32(rawData)
+
+        var archive = Data()
+        let localOffset = UInt64(archive.count)
+        // Local file header using ZIP64 sentinel sizes
+        var localZ64Extra = Data()
+        localZ64Extra.appendUInt16LE(0x0001)
+        localZ64Extra.appendUInt16LE(16)
+        localZ64Extra.appendUInt64LE(UInt64(rawData.count))
+        localZ64Extra.appendUInt64LE(UInt64(zstdCompressed.count))
+
+        archive.appendUInt32LE(0x04034B50)
+        archive.appendUInt16LE(45)
+        archive.appendUInt16LE(0)
+        archive.appendUInt16LE(93) // Zstandard
+        archive.appendUInt16LE(0)
+        archive.appendUInt16LE(0)
+        archive.appendUInt32LE(crc)
+        archive.appendUInt32LE(UInt32.max)
+        archive.appendUInt32LE(UInt32.max)
+        archive.appendUInt16LE(UInt16(nameData.count))
+        archive.appendUInt16LE(UInt16(localZ64Extra.count))
+        archive.append(nameData)
+        archive.append(localZ64Extra)
+        archive.append(zstdCompressed)
+
+        let cdOffset = UInt64(archive.count)
+        var cdZ64Extra = Data()
+        cdZ64Extra.appendUInt16LE(0x0001)
+        cdZ64Extra.appendUInt16LE(24)
+        cdZ64Extra.appendUInt64LE(UInt64(rawData.count))
+        cdZ64Extra.appendUInt64LE(UInt64(zstdCompressed.count))
+        cdZ64Extra.appendUInt64LE(localOffset)
+
+        archive.appendUInt32LE(0x02014B50)
+        archive.appendUInt16LE(45)
+        archive.appendUInt16LE(45)
+        archive.appendUInt16LE(0)
+        archive.appendUInt16LE(93) // Zstandard
+        archive.appendUInt16LE(0)
+        archive.appendUInt16LE(0)
+        archive.appendUInt32LE(crc)
+        archive.appendUInt32LE(UInt32.max)
+        archive.appendUInt32LE(UInt32.max)
+        archive.appendUInt16LE(UInt16(nameData.count))
+        archive.appendUInt16LE(UInt16(cdZ64Extra.count))
+        archive.appendUInt16LE(0)
+        archive.appendUInt16LE(0)
+        archive.appendUInt16LE(0)
+        archive.appendUInt32LE(0)
+        archive.appendUInt32LE(UInt32.max)
+        archive.append(nameData)
+        archive.append(cdZ64Extra)
+
+        let cdSize = UInt64(archive.count) - cdOffset
+        let zip64EOCDOffset = UInt64(archive.count)
+
+        // ZIP64 End of Central Directory Record (56 bytes)
+        archive.appendUInt32LE(0x06064B50)
+        archive.appendUInt64LE(44)
+        archive.appendUInt16LE(45)
+        archive.appendUInt16LE(45)
+        archive.appendUInt32LE(0)
+        archive.appendUInt32LE(0)
+        archive.appendUInt64LE(1)
+        archive.appendUInt64LE(1)
+        archive.appendUInt64LE(cdSize)
+        archive.appendUInt64LE(cdOffset)
+
+        // ZIP64 End of Central Directory Locator (20 bytes)
+        archive.appendUInt32LE(0x07064B50)
+        archive.appendUInt32LE(0)
+        archive.appendUInt64LE(zip64EOCDOffset)
+        archive.appendUInt32LE(1)
+
+        // Classic EOCD (22 bytes)
+        archive.appendUInt32LE(0x06054B50)
+        archive.appendUInt16LE(0)
+        archive.appendUInt16LE(0)
+        archive.appendUInt16LE(UInt16.max)
+        archive.appendUInt16LE(UInt16.max)
+        archive.appendUInt32LE(UInt32.max)
+        archive.appendUInt32LE(UInt32.max)
+        archive.appendUInt16LE(0)
+
+        try archive.write(to: zipURL)
+
+        let listed = try ArchiveExtractor.listZipEntries(at: zipURL)
+        #expect(listed.count == 1)
+        #expect(listed[0].compressionMethod == 93)
+        #expect(listed[0].uncompressedSize == UInt64(rawData.count))
+        #expect(try ArchiveExtractor.readZipEntry(named: "game/script.rpy", from: zipURL) == rawData)
+
+        let outDir = dir.appendingPathComponent("out", isDirectory: true)
+        try ArchiveExtractor.extractArchive(at: zipURL, to: outDir)
+        let extracted = try Data(contentsOf: outDir.appendingPathComponent("game/script.rpy"))
+        #expect(extracted == rawData)
+    }
+
+    @Test("Rejects encrypted ZIP archives cleanly")
+    func rejectEncryptedZip() throws {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let zipURL = dir.appendingPathComponent("encrypted.zip")
+        try ArchiveExtractor.createZip(fromFiles: [("game/script.rpy", Data("secret".utf8))], to: zipURL)
+        var bytes = try Data(contentsOf: zipURL)
+        // Flip bit 0 (encrypted) in both local header flags (+6) and central directory flags.
+        bytes[6] |= 0x01
+        if let cdIdx = bytes.range(of: Data([0x50, 0x4B, 0x01, 0x02]))?.lowerBound {
+            bytes[cdIdx + 8] |= 0x01
+        }
+        try bytes.write(to: zipURL)
+
+        #expect(throws: ArchiveError.encryptedArchive) {
+            try ArchiveExtractor.extractZip(at: zipURL, to: dir.appendingPathComponent("out"))
+        }
+    }
+
+    @Test("Extracts modern tar variants (.tar.xz, .tar.zst, .tar.bz2) and solid LZMA2+BCJ2 .7z")
+    func extractModernHeavilyCompressedArchives() throws {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let srcRoot = dir.appendingPathComponent("src_root", isDirectory: true)
+        let gameDir = srcRoot.appendingPathComponent("game", isDirectory: true)
+        try FileManager.default.createDirectory(at: gameDir, withIntermediateDirectories: true)
+        let expectedScript = Data(repeating: 0x41, count: 4096) + Data("\nlabel start:\n    \"Compressed\"\n".utf8)
+        try expectedScript.write(to: gameDir.appendingPathComponent("script.rpy"))
+        try "8.5.3\n".write(to: srcRoot.appendingPathComponent("script_version.txt"), atomically: true, encoding: .utf8)
+
+        let tarFormats: [(ext: String, flag: String)] = [
+            ("tar.xz", "-J"),
+            ("tar.bz2", "-j"),
+            ("tar.zst", "--zstd"),
+        ]
+        for fmt in tarFormats {
+            let arcURL = dir.appendingPathComponent("NovelTitle.\(fmt.ext)")
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+            p.arguments = [fmt.flag, "-cf", arcURL.path, "-C", srcRoot.path, "."]
+            try p.run()
+            p.waitUntilExit()
+            #expect(p.terminationStatus == 0)
+
+            let outDir = dir.appendingPathComponent("out-\(fmt.ext)", isDirectory: true)
+            try ArchiveExtractor.extractArchive(at: arcURL, to: outDir)
+            let actual = try Data(contentsOf: outDir.appendingPathComponent("game/script.rpy"))
+            #expect(actual == expectedScript)
+            #expect(ArchiveExtractor.stripArchiveExtension(from: arcURL.lastPathComponent) == "NovelTitle")
+        }
+
+        let sevenZPath = ["/home/singh/bin/7z", "/usr/bin/7z", "/usr/bin/7zz"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+        if let sevenZPath {
+            if let exeData = try? Data(contentsOf: URL(fileURLWithPath: "/bin/ls")) {
+                try exeData.write(to: srcRoot.appendingPathComponent("Game.exe"))
+            }
+            let sevenZURL = dir.appendingPathComponent("Novel7z.7z")
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: sevenZPath)
+            p.currentDirectoryURL = srcRoot
+            p.arguments = ["a", "-t7z", "-mx=9", "-ms=on", "-mf=BCJ2", sevenZURL.path, "."]
+            p.standardOutput = FileHandle.nullDevice
+            try p.run()
+            p.waitUntilExit()
+            #expect(p.terminationStatus == 0)
+
+            let outDir = dir.appendingPathComponent("out-7z", isDirectory: true)
+            try ArchiveExtractor.extractArchive(at: sevenZURL, to: outDir)
+            let actual = try Data(contentsOf: outDir.appendingPathComponent("game/script.rpy"))
+            #expect(actual == expectedScript)
+        }
+    }
 }
 
 @Suite("SaveManager & LibraryStore Tests")

@@ -37,10 +37,31 @@ static void *g_active_handle = NULL;
 static int g_active_sdl_version = 2;
 static char g_log_file_path[2048] = {0};
 static char g_loaded_framework[2048] = {0};
-static int g_text_input_active = 0;
 static __weak UIWindowScene *g_target_window_scene = nil;
 static atomic_int g_pending_command = 0;
 static atomic_int g_quit_in_progress = 0;
+
+static atomic_int g_kbd_visible = 0;
+static atomic_int g_engine_wants_text_input = 0;
+static atomic_int g_kbd_user_hidden = 0;
+static atomic_int g_kbd_manual_open = 0;
+static int g_programmatic_hide = 0;
+static pthread_mutex_t g_key_queue_lock = PTHREAD_MUTEX_INITIALIZER;
+static NSMutableArray<NSString *> *g_key_queue = nil;
+
+static void renplay_set_keyboard_visible(BOOL show, BOOL userInitiated);
+
+static void renplay_enqueue_key_event(NSString *eventStr) {
+    if (!eventStr) return;
+    pthread_mutex_lock(&g_key_queue_lock);
+    if (!g_key_queue) {
+        g_key_queue = [[NSMutableArray alloc] init];
+    }
+    if (g_key_queue.count < 256) {
+        [g_key_queue addObject:eventStr];
+    }
+    pthread_mutex_unlock(&g_key_queue_lock);
+}
 
 static UIWindowScene *renplay_find_foreground_scene(void) {
     UISceneActivationState states[] = {
@@ -74,24 +95,49 @@ void renplay_capture_window_scene(void) {
     g_target_window_scene = renplay_find_foreground_scene();
 }
 
+static BOOL renplay_is_sdl_window_object(UIWindow *window) {
+    if (!window) {
+        return NO;
+    }
+    Class sdlWinCls = NSClassFromString(@"SDL_uikitwindow");
+    if (sdlWinCls != Nil && [window isKindOfClass:sdlWinCls]) {
+        return YES;
+    }
+    if (window.windowLevel != UIWindowLevelNormal) {
+        return NO;
+    }
+    Class sdlVcCls = NSClassFromString(@"SDL_uikitviewcontroller");
+    if (sdlVcCls != Nil && window.rootViewController != nil &&
+        [window.rootViewController isKindOfClass:sdlVcCls]) {
+        return YES;
+    }
+    return NO;
+}
+
 static UIWindow *renplay_find_game_window(void) {
     UIWindowScene *scene = renplay_resolve_target_scene();
     if (!scene) {
         return nil;
     }
+    UIWindow *sdlMatch = nil;
     UIWindow *fallback = nil;
     for (UIWindow *window in scene.windows) {
         if (window.hidden || window.alpha == 0 || window.windowLevel != UIWindowLevelNormal || !window.rootViewController) {
             continue;
         }
-        if (window.isKeyWindow) {
+        BOOL isSDL = renplay_is_sdl_window_object(window);
+        if (isSDL && window.isKeyWindow) {
             return window;
         }
-        if (!fallback) {
+        if (isSDL && !sdlMatch) {
+            sdlMatch = window;
+        } else if (window.isKeyWindow && !fallback) {
+            fallback = window;
+        } else if (!fallback) {
             fallback = window;
         }
     }
-    return fallback;
+    return sdlMatch ?: fallback;
 }
 
 static UIViewController *renplay_find_presenter(UIWindow *window) {
@@ -115,8 +161,7 @@ static UIViewController *renplay_find_presenter(UIWindow *window) {
 @implementation UIWindow (RenPlaySDLScene)
 
 - (void)renplay_makeKeyAndVisible {
-    Class sdlWinCls = NSClassFromString(@"SDL_uikitwindow");
-    if (sdlWinCls != Nil && [self isKindOfClass:sdlWinCls] && self.windowScene == nil) {
+    if (self.windowScene == nil && renplay_is_sdl_window_object(self)) {
         UIWindowScene *scene = renplay_resolve_target_scene();
         if (scene != nil) {
             self.windowScene = scene;
@@ -126,14 +171,23 @@ static UIViewController *renplay_find_presenter(UIWindow *window) {
 }
 
 - (void)renplay_setHidden:(BOOL)hidden {
-    Class sdlWinCls = NSClassFromString(@"SDL_uikitwindow");
-    if (!hidden && sdlWinCls != Nil && [self isKindOfClass:sdlWinCls] && self.windowScene == nil) {
+    if (!hidden && self.windowScene == nil && renplay_is_sdl_window_object(self)) {
         UIWindowScene *scene = renplay_resolve_target_scene();
         if (scene != nil) {
             self.windowScene = scene;
         }
     }
     [self renplay_setHidden:hidden];
+}
+
+- (void)renplay_setRootViewController:(UIViewController *)rootViewController {
+    [self renplay_setRootViewController:rootViewController];
+    if (rootViewController != nil && self.windowScene == nil && renplay_is_sdl_window_object(self)) {
+        UIWindowScene *scene = renplay_resolve_target_scene();
+        if (scene != nil) {
+            self.windowScene = scene;
+        }
+    }
 }
 
 @end
@@ -472,13 +526,285 @@ static UIViewController *renplay_find_presenter(UIWindow *window) {
 + (void)requestAgeRange {}
 @end
 
+@interface RenPlayKeyboardField : UITextField <UITextFieldDelegate>
+- (void)resetToSentinel;
+@end
+
+static NSString * const kRenPlaySentinel = @"\u200B";
+static RenPlayKeyboardField *g_kbd_field = nil;
+static id g_kbd_show_obs = nil;
+static id g_kbd_hide_obs = nil;
+
+@implementation RenPlayKeyboardField
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+
+    self.autocorrectionType = UITextAutocorrectionTypeNo;
+    self.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    self.spellCheckingType = UITextSpellCheckingTypeNo;
+    self.smartQuotesType = UITextSmartQuotesTypeNo;
+    self.smartDashesType = UITextSmartDashesTypeNo;
+    self.smartInsertDeleteType = UITextSmartInsertDeleteTypeNo;
+    self.returnKeyType = UIReturnKeyDone;
+    self.enablesReturnKeyAutomatically = NO;
+    self.delegate = self;
+    self.hidden = NO;
+    self.alpha = 0.01;
+    self.textColor = [UIColor clearColor];
+    self.tintColor = [UIColor clearColor];
+    self.backgroundColor = [UIColor clearColor];
+
+    UIView *accessory = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 42)];
+    accessory.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.96];
+    accessory.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    UIView *hairline = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 0.5)];
+    hairline.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2];
+    hairline.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [accessory addSubview:hairline];
+
+    UIButton *hideBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration *hideCfg = [UIButtonConfiguration plainButtonConfiguration];
+    hideCfg.title = @"Hide Keyboard";
+    hideCfg.image = [UIImage systemImageNamed:@"keyboard.chevron.compact.down"];
+    hideCfg.imagePadding = 6;
+    hideCfg.baseForegroundColor = [UIColor whiteColor];
+    hideCfg.contentInsets = NSDirectionalEdgeInsetsMake(6, 10, 6, 10);
+    hideBtn.configuration = hideCfg;
+    hideBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [hideBtn addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
+        (void)action;
+        renplay_set_keyboard_visible(NO, YES);
+    }] forControlEvents:UIControlEventTouchUpInside];
+
+    UIButton *enterBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration *enterCfg = [UIButtonConfiguration filledButtonConfiguration];
+    enterCfg.title = @"Enter";
+    enterCfg.image = [UIImage systemImageNamed:@"return"];
+    enterCfg.imagePadding = 5;
+    enterCfg.baseBackgroundColor = [UIColor systemBlueColor];
+    enterCfg.baseForegroundColor = [UIColor whiteColor];
+    enterCfg.cornerStyle = UIButtonConfigurationCornerStyleMedium;
+    enterCfg.contentInsets = NSDirectionalEdgeInsetsMake(5, 12, 5, 12);
+    enterBtn.configuration = enterCfg;
+    enterBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [enterBtn addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
+        (void)action;
+        renplay_enqueue_key_event(@"K:RETURN");
+    }] forControlEvents:UIControlEventTouchUpInside];
+
+    [accessory addSubview:hideBtn];
+    [accessory addSubview:enterBtn];
+    [NSLayoutConstraint activateConstraints:@[
+        [hideBtn.leadingAnchor constraintEqualToAnchor:accessory.safeAreaLayoutGuide.leadingAnchor constant:8],
+        [hideBtn.centerYAnchor constraintEqualToAnchor:accessory.centerYAnchor],
+        [enterBtn.trailingAnchor constraintEqualToAnchor:accessory.safeAreaLayoutGuide.trailingAnchor constant:-8],
+        [enterBtn.centerYAnchor constraintEqualToAnchor:accessory.centerYAnchor],
+    ]];
+    self.inputAccessoryView = accessory;
+
+    [self addTarget:self action:@selector(handleEditingChanged) forControlEvents:UIControlEventEditingChanged];
+    [self resetToSentinel];
+    return self;
+}
+
+- (void)resetToSentinel {
+    self.text = kRenPlaySentinel;
+    UITextPosition *endPos = self.endOfDocument;
+    if (endPos) {
+        self.selectedTextRange = [self textRangeFromPosition:endPos toPosition:endPos];
+    }
+}
+
+- (void)deleteBackward {
+    if (self.markedTextRange != nil) {
+        [super deleteBackward];
+        return;
+    }
+    NSString *current = self.text ?: @"";
+    if (current.length == 0 || [current isEqualToString:kRenPlaySentinel]) {
+        renplay_enqueue_key_event(@"K:BACKSPACE");
+        [self resetToSentinel];
+        return;
+    }
+    [super deleteBackward];
+}
+
+- (void)handleEditingChanged {
+    if (self.markedTextRange != nil) {
+        return;
+    }
+    NSString *current = self.text ?: @"";
+    if ([current isEqualToString:kRenPlaySentinel]) {
+        return;
+    }
+    if (current.length == 0) {
+        renplay_enqueue_key_event(@"K:BACKSPACE");
+        [self resetToSentinel];
+        return;
+    }
+    NSString *cleaned = [current stringByReplacingOccurrencesOfString:kRenPlaySentinel withString:@""];
+    if (cleaned.length > 0) {
+        renplay_enqueue_key_event([@"T:" stringByAppendingString:cleaned]);
+    } else {
+        renplay_enqueue_key_event(@"K:BACKSPACE");
+    }
+    [self resetToSentinel];
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    (void)textField;
+    renplay_enqueue_key_event(@"K:RETURN");
+    return NO;
+}
+
+- (void)textFieldDidEndEditing:(UITextField *)textField {
+    (void)textField;
+    atomic_store(&g_kbd_visible, 0);
+    if (!g_programmatic_hide && atomic_load(&g_engine_wants_text_input) != 0) {
+        atomic_store(&g_kbd_user_hidden, 1);
+    }
+}
+
+@end
+
+static void renplay_install_keyboard_observers(void) {
+    if (g_kbd_show_obs != nil) return;
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    g_kbd_show_obs = [nc addObserverForName:UIKeyboardWillShowNotification
+                                     object:nil
+                                      queue:[NSOperationQueue mainQueue]
+                                 usingBlock:^(NSNotification *note) {
+        (void)note;
+        if (g_kbd_field && g_kbd_field.isFirstResponder) {
+            atomic_store(&g_kbd_visible, 1);
+        }
+    }];
+    g_kbd_hide_obs = [nc addObserverForName:UIKeyboardWillHideNotification
+                                     object:nil
+                                      queue:[NSOperationQueue mainQueue]
+                                 usingBlock:^(NSNotification *note) {
+        (void)note;
+        atomic_store(&g_kbd_visible, 0);
+        if (!g_programmatic_hide && atomic_load(&g_engine_wants_text_input) != 0) {
+            atomic_store(&g_kbd_user_hidden, 1);
+        }
+    }];
+}
+
+static void renplay_set_keyboard_visible_on_main(BOOL show, BOOL userInitiated) {
+    renplay_install_keyboard_observers();
+    if (show) {
+        if (userInitiated) {
+            atomic_store(&g_kbd_user_hidden, 0);
+            if (atomic_load(&g_engine_wants_text_input) == 0) {
+                atomic_store(&g_kbd_manual_open, 1);
+            }
+        }
+        UIWindow *gameWin = renplay_find_game_window();
+        UIView *hostView = gameWin.rootViewController.view;
+        if (!hostView) {
+            return;
+        }
+        if (!g_kbd_field) {
+            g_kbd_field = [[RenPlayKeyboardField alloc] initWithFrame:CGRectMake(-120, -120, 20, 20)];
+        }
+        if (g_kbd_field.superview != hostView) {
+            [g_kbd_field removeFromSuperview];
+            g_kbd_field.frame = CGRectMake(-120, -120, 20, 20);
+            [hostView insertSubview:g_kbd_field atIndex:0];
+        }
+        if (!gameWin.isKeyWindow) {
+            [gameWin makeKeyWindow];
+        }
+        [g_kbd_field resetToSentinel];
+        if (![g_kbd_field isFirstResponder]) {
+            [g_kbd_field becomeFirstResponder];
+        }
+        atomic_store(&g_kbd_visible, 1);
+    } else {
+        g_programmatic_hide = 1;
+        if (userInitiated && atomic_load(&g_engine_wants_text_input) != 0) {
+            atomic_store(&g_kbd_user_hidden, 1);
+        }
+        atomic_store(&g_kbd_manual_open, 0);
+        if (g_kbd_field != nil && [g_kbd_field isFirstResponder]) {
+            [g_kbd_field resignFirstResponder];
+        }
+        atomic_store(&g_kbd_visible, 0);
+        g_programmatic_hide = 0;
+    }
+}
+
+static void renplay_set_keyboard_visible(BOOL show, BOOL userInitiated) {
+    if ([NSThread isMainThread]) {
+        renplay_set_keyboard_visible_on_main(show, userInitiated);
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            renplay_set_keyboard_visible_on_main(show, userInitiated);
+        });
+    }
+}
+
 @interface RenPlayRuntimeBridge : NSObject
 + (int)consumeCommand;
++ (void)startTextInput;
++ (void)stopTextInput;
++ (int)isScreenKeyboardShown;
++ (void)reopenIfEngineTextInputActive;
++ (int)hasPendingKeyEvent;
++ (NSString *)consumeKeyEvent;
 @end
 
 @implementation RenPlayRuntimeBridge
 + (int)consumeCommand {
     return atomic_exchange(&g_pending_command, 0);
+}
+
++ (void)startTextInput {
+    atomic_store(&g_engine_wants_text_input, 1);
+    if (atomic_load(&g_kbd_user_hidden) == 0) {
+        renplay_set_keyboard_visible(YES, NO);
+    }
+}
+
++ (void)stopTextInput {
+    atomic_store(&g_engine_wants_text_input, 0);
+    atomic_store(&g_kbd_user_hidden, 0);
+    if (atomic_exchange(&g_kbd_manual_open, 0) == 0) {
+        renplay_set_keyboard_visible(NO, NO);
+    }
+}
+
++ (int)isScreenKeyboardShown {
+    return (atomic_load(&g_kbd_visible) != 0 || atomic_load(&g_kbd_user_hidden) != 0) ? 1 : 0;
+}
+
++ (void)reopenIfEngineTextInputActive {
+    if (atomic_load(&g_engine_wants_text_input) != 0) {
+        atomic_store(&g_kbd_user_hidden, 0);
+        renplay_set_keyboard_visible(YES, YES);
+    }
+}
+
++ (int)hasPendingKeyEvent {
+    pthread_mutex_lock(&g_key_queue_lock);
+    int has = (g_key_queue != nil && g_key_queue.count > 0) ? 1 : 0;
+    pthread_mutex_unlock(&g_key_queue_lock);
+    return has;
+}
+
++ (NSString *)consumeKeyEvent {
+    pthread_mutex_lock(&g_key_queue_lock);
+    NSString *first = nil;
+    if (g_key_queue != nil && g_key_queue.count > 0) {
+        first = [g_key_queue objectAtIndex:0];
+        [g_key_queue removeObjectAtIndex:0];
+    }
+    pthread_mutex_unlock(&g_key_queue_lock);
+    return first;
 }
 @end
 
@@ -542,20 +868,21 @@ void renplay_install_sdl_scene_bridge(void) {
         if (h1 && h2) {
             method_exchangeImplementations(h1, h2);
         }
+        Method r1 = class_getInstanceMethod(cls, @selector(setRootViewController:));
+        Method r2 = class_getInstanceMethod(cls, @selector(renplay_setRootViewController:));
+        if (r1 && r2) {
+            method_exchangeImplementations(r1, r2);
+        }
     });
 }
 
 int renplay_has_sdl_window(void) {
-    Class sdlWinCls = NSClassFromString(@"SDL_uikitwindow");
-    if (sdlWinCls == Nil) {
-        return 0;
-    }
     UIWindowScene *scene = renplay_resolve_target_scene();
     if (!scene) {
         return 0;
     }
     for (UIWindow *win in scene.windows) {
-        if ([win isKindOfClass:sdlWinCls] && !win.hidden) {
+        if (!win.hidden && renplay_is_sdl_window_object(win)) {
             return 1;
         }
     }
@@ -664,6 +991,7 @@ int renplay_launch_engine(
     if (setHint != NULL) {
         setHint("SDL_IOS_HIDE_HOME_INDICATOR", "1");
         setHint("SDL_IOS_IDLE_TIMER_DISABLED", "1");
+        setHint("SDL_ENABLE_SCREEN_KEYBOARD", "1");
     }
 
     typedef int (*EntryFn)(int, char **);
@@ -708,53 +1036,6 @@ int renplay_launch_engine(
     return rc;
 }
 
-static void renplay_focus_sdl_textfield_on_main(int show) {
-    Class sdlWinCls = NSClassFromString(@"SDL_uikitwindow");
-    if (sdlWinCls == Nil) {
-        return;
-    }
-    UIWindowScene *scene = renplay_resolve_target_scene();
-    if (!scene) {
-        return;
-    }
-    for (UIWindow *win in scene.windows) {
-        if (![win isKindOfClass:sdlWinCls] || win.hidden) {
-            continue;
-        }
-        UIView *rootView = win.rootViewController.view;
-        for (UIView *subview in rootView.subviews) {
-            if ([subview isKindOfClass:UITextField.class]) {
-                if (show) {
-                    [subview becomeFirstResponder];
-                } else {
-                    [subview resignFirstResponder];
-                }
-                return;
-            }
-            for (UIView *child in subview.subviews) {
-                if ([child isKindOfClass:UITextField.class]) {
-                    if (show) {
-                        [child becomeFirstResponder];
-                    } else {
-                        [child resignFirstResponder];
-                    }
-                    return;
-                }
-            }
-        }
-    }
-}
-
-static void renplay_focus_sdl_textfield(int show) {
-    if ([NSThread isMainThread]) {
-        renplay_focus_sdl_textfield_on_main(show);
-    } else {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            renplay_focus_sdl_textfield_on_main(show);
-        });
-    }
-}
-
 static void *renplay_quit_watchdog(void *arg) {
     (void)arg;
     usleep(300000);
@@ -765,9 +1046,8 @@ static void *renplay_quit_watchdog(void *arg) {
 
 void renplay_request_command(int command) {
     if (command == RENPLAY_CMD_TOGGLE_KEYBOARD) {
-        g_text_input_active = !g_text_input_active;
-        atomic_store(&g_pending_command, RENPLAY_CMD_TOGGLE_KEYBOARD);
-        renplay_focus_sdl_textfield(g_text_input_active);
+        BOOL shouldShow = (atomic_load(&g_kbd_visible) == 0);
+        renplay_set_keyboard_visible(shouldShow, YES);
         return;
     }
     if (command == RENPLAY_CMD_QUIT) {
@@ -850,6 +1130,20 @@ void renplay_toggle_text_input(void) {
     renplay_request_command(RENPLAY_CMD_TOGGLE_KEYBOARD);
 }
 
+int renplay_is_keyboard_visible(void) {
+    return atomic_load(&g_kbd_visible) != 0 ? 1 : 0;
+}
+
+int renplay_should_show_keyboard_pill(void) {
+    return (atomic_load(&g_engine_wants_text_input) != 0 &&
+            atomic_load(&g_kbd_visible) == 0 &&
+            atomic_load(&g_kbd_user_hidden) != 0) ? 1 : 0;
+}
+
+void renplay_show_keyboard_from_ui(void) {
+    renplay_set_keyboard_visible(YES, YES);
+}
+
 #else
 
 void renplay_install_sdl_scene_bridge(void) {}
@@ -895,6 +1189,9 @@ void renplay_send_key_press(int sdlKeycode, int sdlScancode) {
     (void)sdlScancode;
 }
 void renplay_toggle_text_input(void) {}
+int renplay_is_keyboard_visible(void) { return 0; }
+int renplay_should_show_keyboard_pill(void) { return 0; }
+void renplay_show_keyboard_from_ui(void) {}
 const char *renplay_get_log_file_path(void) { return NULL; }
 int renplay_has_sdl_window(void) { return 0; }
 

@@ -30,8 +30,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install zlib dev headers
-        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
+      - name: Install archive and compression dev dependencies
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libarchive-dev p7zip-full xz-utils zstd bzip2
 
       - name: Setup Swift 6.2
         uses: swift-actions/setup-swift@v2

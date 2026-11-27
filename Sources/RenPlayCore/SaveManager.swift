@@ -157,13 +157,13 @@ public final class SaveManager: Sendable {
             return 1
         }
 
-        if ext == "zip" {
+        if ArchiveExtractor.isSupportedArchive(sourceURL) {
             if let backupDir {
                 _ = try? createBackup(of: saveDir, to: backupDir, maxBackups: 10)
             }
             let tempDir = fm.temporaryDirectory.appendingPathComponent("renplay-save-import-\(UUID().uuidString)")
             defer { try? fm.removeItem(at: tempDir) }
-            try ArchiveExtractor.extractZip(at: sourceURL, to: tempDir)
+            try ArchiveExtractor.extractArchive(at: sourceURL, to: tempDir)
 
             var imported = 0
             if let enumerator = fm.enumerator(at: tempDir, includingPropertiesForKeys: [.isRegularFileKey]) {

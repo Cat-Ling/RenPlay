@@ -7,6 +7,7 @@ import Foundation
 public enum ZlibError: Error, LocalizedError, Sendable {
     case inflateFailed(Int32)
     case deflateFailed(Int32)
+    case zstdFailed(Int32)
 
     public var errorDescription: String? {
         switch self {
@@ -14,6 +15,8 @@ public enum ZlibError: Error, LocalizedError, Sendable {
             return "zlib inflate failed with status \(code)"
         case .deflateFailed(let code):
             return "zlib deflate failed with status \(code)"
+        case .zstdFailed(let code):
+            return "zstd operation failed with status \(code)"
         }
     }
 }
@@ -59,6 +62,36 @@ public enum ZlibCodec {
         guard rc == 0, let outPtr else {
             if let outPtr { czlib_free(outPtr) }
             throw ZlibError.deflateFailed(rc)
+        }
+        defer { czlib_free(outPtr) }
+        return Data(bytes: outPtr, count: outLen)
+    }
+
+    public static func zstdDecompress(_ data: Data) throws -> Data {
+        var outPtr: UnsafeMutablePointer<UInt8>?
+        var outLen: Int = 0
+        let rc = data.withUnsafeBytes { rawBuf -> Int32 in
+            let ptr = rawBuf.bindMemory(to: UInt8.self).baseAddress
+            return czlib_zstd_decompress(ptr, data.count, &outPtr, &outLen)
+        }
+        guard rc == 0, let outPtr else {
+            if let outPtr { czlib_free(outPtr) }
+            throw ZlibError.zstdFailed(rc)
+        }
+        defer { czlib_free(outPtr) }
+        return Data(bytes: outPtr, count: outLen)
+    }
+
+    public static func zstdCompress(_ data: Data, level: Int32 = 3) throws -> Data {
+        var outPtr: UnsafeMutablePointer<UInt8>?
+        var outLen: Int = 0
+        let rc = data.withUnsafeBytes { rawBuf -> Int32 in
+            let ptr = rawBuf.bindMemory(to: UInt8.self).baseAddress
+            return czlib_zstd_compress(ptr, data.count, level, &outPtr, &outLen)
+        }
+        guard rc == 0, let outPtr else {
+            if let outPtr { czlib_free(outPtr) }
+            throw ZlibError.zstdFailed(rc)
         }
         defer { czlib_free(outPtr) }
         return Data(bytes: outPtr, count: outLen)
