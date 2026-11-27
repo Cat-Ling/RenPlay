@@ -167,7 +167,6 @@ public struct GameSettings: Codable, Sendable, Hashable {
     public var overrideDeviceVariant: Bool
     public var selectedVariants: [String]
     public var showTitleWithArtwork: Bool
-    public var customAccentHex: String?
 
     public init(
         orientation: GameOrientation = .auto,
@@ -187,8 +186,7 @@ public struct GameSettings: Codable, Sendable, Hashable {
         compatibilityPatches: Bool = true,
         overrideDeviceVariant: Bool = false,
         selectedVariants: [String] = [],
-        showTitleWithArtwork: Bool = true,
-        customAccentHex: String? = nil
+        showTitleWithArtwork: Bool = true
     ) {
         self.orientation = orientation
         self.allowNetwork = allowNetwork
@@ -208,7 +206,6 @@ public struct GameSettings: Codable, Sendable, Hashable {
         self.overrideDeviceVariant = overrideDeviceVariant
         self.selectedVariants = selectedVariants
         self.showTitleWithArtwork = showTitleWithArtwork
-        self.customAccentHex = customAccentHex
     }
 
     // Custom Codable keeps older library.json entries decodable without migrating on disk.
@@ -232,7 +229,6 @@ public struct GameSettings: Codable, Sendable, Hashable {
         overrideDeviceVariant = try c.decodeIfPresent(Bool.self, forKey: .overrideDeviceVariant) ?? false
         selectedVariants = try c.decodeIfPresent([String].self, forKey: .selectedVariants) ?? []
         showTitleWithArtwork = try c.decodeIfPresent(Bool.self, forKey: .showTitleWithArtwork) ?? true
-        customAccentHex = try c.decodeIfPresent(String.self, forKey: .customAccentHex)
     }
 }
 

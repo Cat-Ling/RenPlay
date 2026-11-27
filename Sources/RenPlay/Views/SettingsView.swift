@@ -43,6 +43,11 @@ struct SettingsView: View {
                             .font(.subheadline)
                         Slider(value: $appState.appSettings.overlayOpacity, in: 0.35...1.0, step: 0.05)
                     }
+                    VStack(alignment: .leading) {
+                        Text(String(format: "Mouse Speed • %.1fx", appState.appSettings.virtualMouseSpeed))
+                            .font(.subheadline)
+                        Slider(value: $appState.appSettings.virtualMouseSpeed, in: 0.4...2.5, step: 0.1)
+                    }
                     Stepper(
                         "Backups Kept: \(appState.appSettings.autoBackupCount)",
                         value: $appState.appSettings.autoBackupCount,

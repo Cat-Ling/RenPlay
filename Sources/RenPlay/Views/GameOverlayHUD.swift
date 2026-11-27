@@ -17,7 +17,10 @@ final class GameOverlayWindow: UIWindow {
         initialVolume: Double,
         showFPS: Bool,
         showQuickBar: Bool,
-        mouseSpeed: Double
+        mouseSpeed: Double,
+        initialTransparentTextboxes: Bool,
+        initialVariants: [String],
+        onPersistSettings: ((Double, Bool, Bool, Double) -> Void)?
     ) {
         let controller = GameOverlayViewController(
             gameID: gameID,
@@ -27,7 +30,10 @@ final class GameOverlayWindow: UIWindow {
             initialVolume: initialVolume,
             showFPS: showFPS,
             showQuickBar: showQuickBar,
-            mouseSpeed: mouseSpeed
+            mouseSpeed: mouseSpeed,
+            initialTransparentTextboxes: initialTransparentTextboxes,
+            initialVariants: initialVariants,
+            onPersistSettings: onPersistSettings
         )
         self.overlayController = controller
         super.init(windowScene: windowScene)
@@ -116,10 +122,9 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
     private var totalDialogue = 0
     private var isHUDExpanded = false
     private var activeModal: HudModalKind?
-    private var transparentTextboxes = false
-    private var selectedVariants: Set<String> = UIDevice.current.userInterfaceIdiom == .pad
-        ? ["tablet", "touch", "ios"]
-        : ["phone", "touch", "ios"]
+    private var transparentTextboxes: Bool
+    private var selectedVariants: Set<String>
+    private let onPersistSettings: ((Double, Bool, Bool, Double) -> Void)?
     private var selectedRotationMode: Int = Int(renplay_get_preferred_orientation())
 
     // Dynamic modal views updated on RPC reply
@@ -157,7 +162,10 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         initialVolume: Double,
         showFPS: Bool,
         showQuickBar: Bool,
-        mouseSpeed: Double
+        mouseSpeed: Double,
+        initialTransparentTextboxes: Bool,
+        initialVariants: [String],
+        onPersistSettings: ((Double, Bool, Bool, Double) -> Void)?
     ) {
         self.gameID = gameID
         self.gameName = gameName
@@ -167,6 +175,15 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         self.showFPS = showFPS
         self.showQuickBar = showQuickBar
         self.mouseSpeed = CGFloat(min(max(mouseSpeed, 0.4), 2.5))
+        self.transparentTextboxes = initialTransparentTextboxes
+        if initialVariants.isEmpty {
+            self.selectedVariants = UIDevice.current.userInterfaceIdiom == .pad
+                ? ["tablet", "touch", "ios"]
+                : ["phone", "touch", "ios"]
+        } else {
+            self.selectedVariants = Set(initialVariants)
+        }
+        self.onPersistSettings = onPersistSettings
         let saved = UserDefaults.standard.stringArray(forKey: "renplay.savedVars.\(gameID.uuidString)") ?? []
         self.savedVarNames = Set(saved)
         super.init(nibName: nil, bundle: nil)
@@ -899,6 +916,10 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         requestVariablesList()
     }
 
+    private func persistOverlaySettings() {
+        onPersistSettings?(Double(overlayAlpha), showFPS, showQuickBar, Double(mouseSpeed))
+    }
+
     private func buildSettingsModal() {
         modalHeaderIcon.image = UIImage(systemName: "gearshape.fill")
         modalTitleLabel.text = "Overlay Settings"
@@ -912,6 +933,7 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
             self.overlayAlpha = CGFloat(opacitySlider.value)
             self.toggleButton.backgroundColor = UIColor(white: 0.12, alpha: max(self.overlayAlpha, 0.55))
             self.quickBarView.backgroundColor = UIColor(white: 0.12, alpha: max(self.overlayAlpha, 0.55))
+            self.persistOverlaySettings()
         }, for: .valueChanged)
         modalBody.addArrangedSubview(makeLabeledRow("Opacity", control: opacitySlider))
 
@@ -932,6 +954,7 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
             guard let self, let fpsSwitch else { return }
             self.showFPS = fpsSwitch.isOn
             self.updateVisibility()
+            self.persistOverlaySettings()
         }, for: .valueChanged)
         modalBody.addArrangedSubview(makeLabeledRow("FPS Counter", control: fpsSwitch))
 
@@ -941,6 +964,7 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
             guard let self, let barSwitch else { return }
             self.showQuickBar = barSwitch.isOn
             self.updateVisibility()
+            self.persistOverlaySettings()
         }, for: .valueChanged)
         modalBody.addArrangedSubview(makeLabeledRow("Quick Bar", control: barSwitch))
 
@@ -951,6 +975,7 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         speedSlider.addAction(UIAction { [weak self, weak speedSlider] _ in
             guard let self, let speedSlider else { return }
             self.mouseSpeed = CGFloat(speedSlider.value)
+            self.persistOverlaySettings()
         }, for: .valueChanged)
         modalBody.addArrangedSubview(makeLabeledRow("Mouse Speed", control: speedSlider))
     }
@@ -1259,6 +1284,7 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         }
         isHUDExpanded = false
         showQuickBar.toggle()
+        persistOverlaySettings()
         updateVisibility()
         layoutAllFrames()
     }

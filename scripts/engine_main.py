@@ -410,6 +410,33 @@ if renpy_base not in sys.path:
 
 warnings.simplefilter("ignore", DeprecationWarning)
 
+if os.environ.get("RENPY_COMPAT_PATCHES") == "1" and os.environ.get("RENPY_SAFE_MODE") != "1":
+    if not hasattr(os, "startfile"):
+        os.startfile = lambda *args, **kwargs: None
+    try:
+        import ctypes as _compat_ctypes
+        if not hasattr(_compat_ctypes, "windll"):
+            class _DummyWinFunc(object):
+                def __init__(self, dll_name, fn_name):
+                    self._dll_name = dll_name
+                    self._fn_name = fn_name
+                def __call__(self, *args, **kwargs):
+                    if self._dll_name == "user32" and self._fn_name == "GetSystemMetrics":
+                        idx = args[0] if args else 0
+                        return 1920 if idx == 0 else (1080 if idx == 1 else 0)
+                    return 0
+            class _DummyWinLib(object):
+                def __init__(self, dll_name):
+                    self._dll_name = dll_name
+                def __getattr__(self, fn_name):
+                    return _DummyWinFunc(self._dll_name, fn_name)
+            class _DummyWinDLL(object):
+                def __getattr__(self, dll_name):
+                    return _DummyWinLib(dll_name.lower())
+            _compat_ctypes.windll = _DummyWinDLL()
+    except Exception:
+        pass
+
 import renpy.bootstrap
 
 renpy.__main__ = sys.modules[__name__]

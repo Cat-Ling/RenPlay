@@ -235,7 +235,9 @@ public final class EngineLauncher {
                                     initialVolume: initialVolume,
                                     showFPS: showFPS,
                                     showQuickBar: showQuickBar,
-                                    mouseSpeed: mouseSpeed
+                                    mouseSpeed: mouseSpeed,
+                                    initialTransparentTextboxes: transparentTextboxes != 0,
+                                    initialVariants: variant.split(separator: " ").map(String.init)
                                 )
                             }
                         }
@@ -319,7 +321,9 @@ public final class EngineLauncher {
         initialVolume: Double,
         showFPS: Bool,
         showQuickBar: Bool,
-        mouseSpeed: Double
+        mouseSpeed: Double,
+        initialTransparentTextboxes: Bool,
+        initialVariants: [String]
     ) {
         guard let scene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
@@ -327,6 +331,7 @@ public final class EngineLauncher {
             ?? UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else {
             return
         }
+        let store = self.libraryStore
         let win = GameOverlayWindow(
             windowScene: scene,
             gameID: gameID,
@@ -336,7 +341,17 @@ public final class EngineLauncher {
             initialVolume: initialVolume,
             showFPS: showFPS,
             showQuickBar: showQuickBar,
-            mouseSpeed: mouseSpeed
+            mouseSpeed: mouseSpeed,
+            initialTransparentTextboxes: initialTransparentTextboxes,
+            initialVariants: initialVariants,
+            onPersistSettings: { newOpacity, newFPS, newQuickBar, newMouseSpeed in
+                var current = store.loadSettings()
+                current.overlayOpacity = newOpacity
+                current.showFPSOverlay = newFPS
+                current.showQuickBar = newQuickBar
+                current.virtualMouseSpeed = newMouseSpeed
+                try? store.saveSettings(current)
+            }
         )
         win.isHidden = false
         self.overlayWindow = win
@@ -1230,9 +1245,18 @@ public final class EngineLauncher {
                 variants = req.get("variants", [])
                 if isinstance(variants, list) and variants:
                     try:
-                        config.variants = [str(v) for v in variants]
+                        clean_vars = [str(v) for v in variants if v]
+                        config.variants = clean_vars + [None]
+                        try:
+                            renpy.display.touch = ("touch" in clean_vars)
+                        except Exception:
+                            pass
+                        try:
+                            renpy.style.rebuild()
+                        except Exception:
+                            pass
                         renpy.exports.restart_interaction()
-                        _renplay_post_rpc_reply_obj({"op": "set_variants", "ok": True, "variants": config.variants})
+                        _renplay_post_rpc_reply_obj({"op": "set_variants", "ok": True, "variants": clean_vars})
                     except Exception as exc:
                         _renplay_post_rpc_reply_obj({"op": "set_variants", "ok": False, "error": str(exc)})
                 return

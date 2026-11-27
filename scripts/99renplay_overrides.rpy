@@ -407,9 +407,18 @@ init 999 python:
             variants = req.get("variants", [])
             if isinstance(variants, list) and variants:
                 try:
-                    config.variants = [str(v) for v in variants]
+                    clean_vars = [str(v) for v in variants if v]
+                    config.variants = clean_vars + [None]
+                    try:
+                        renpy.display.touch = ("touch" in clean_vars)
+                    except Exception:
+                        pass
+                    try:
+                        renpy.style.rebuild()
+                    except Exception:
+                        pass
                     renpy.exports.restart_interaction()
-                    _renplay_post_rpc_reply_obj({"op": "set_variants", "ok": True, "variants": config.variants})
+                    _renplay_post_rpc_reply_obj({"op": "set_variants", "ok": True, "variants": clean_vars})
                 except Exception as exc:
                     _renplay_post_rpc_reply_obj({"op": "set_variants", "ok": False, "error": str(exc)})
             return
