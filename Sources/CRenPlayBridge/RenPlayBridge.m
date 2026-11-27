@@ -13,13 +13,16 @@
 @import AVFoundation;
 @import StoreKit;
 
+#include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
 #include <execinfo.h>
 #include <fcntl.h>
+#include <objc/message.h>
 #include <objc/runtime.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -695,6 +698,67 @@ static void renplay_install_keyboard_observers(void) {
     }];
 }
 
+static void renplay_log_line(const char *fmt, ...) {
+    va_list ap;
+    char buf[1024];
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    NSLog(@"[RenPlay] %s", buf);
+    if (g_log_file_path[0] != '\0') {
+        FILE *fp = fopen(g_log_file_path, "a");
+        if (fp != NULL) {
+            fprintf(fp, "[RenPlay] %s\n", buf);
+            fclose(fp);
+        }
+    }
+}
+
+static void renplay_enable_sdl_text_events(void) {
+    if (!g_active_handle) {
+        return;
+    }
+    if (g_active_sdl_version >= 3) {
+        typedef void (*SDL3SetEventEnabledFn)(uint32_t type, bool enabled);
+        SDL3SetEventEnabledFn setEnabled = (SDL3SetEventEnabledFn)dlsym(g_active_handle, "SDL_SetEventEnabled");
+        if (setEnabled) {
+            setEnabled(0x302u, true);
+            setEnabled(0x303u, true);
+        }
+    } else {
+        typedef uint8_t (*SDL2EventStateFn)(uint32_t type, int state);
+        SDL2EventStateFn eventState = (SDL2EventStateFn)dlsym(g_active_handle, "SDL_EventState");
+        if (eventState) {
+            eventState(0x302u, 1);
+            eventState(0x303u, 1);
+        }
+    }
+}
+
+static void renplay_attempt_focus_keyboard_field(UIWindow *gameWin) {
+    if (!g_kbd_field || !gameWin) {
+        return;
+    }
+    if (gameWin.isHidden) {
+        gameWin.hidden = NO;
+    }
+    if (!gameWin.isKeyWindow) {
+        [gameWin makeKeyAndVisible];
+    }
+    if (gameWin.rootViewController && [gameWin.rootViewController respondsToSelector:@selector(textField)]) {
+        id sdlField = ((id (*)(id, SEL))objc_msgSend)(gameWin.rootViewController, @selector(textField));
+        if ([sdlField isKindOfClass:[UIResponder class]] && [(UIResponder *)sdlField isFirstResponder]) {
+            [(UIResponder *)sdlField resignFirstResponder];
+        }
+    }
+    if (![g_kbd_field isFirstResponder]) {
+        (void)[g_kbd_field becomeFirstResponder];
+    }
+    if ([g_kbd_field isFirstResponder]) {
+        atomic_store(&g_kbd_visible, 1);
+    }
+}
+
 static void renplay_set_keyboard_visible_on_main(BOOL show, BOOL userInitiated) {
     renplay_install_keyboard_observers();
     if (show) {
@@ -706,25 +770,54 @@ static void renplay_set_keyboard_visible_on_main(BOOL show, BOOL userInitiated) 
         }
         UIWindow *gameWin = renplay_find_game_window();
         UIView *hostView = gameWin.rootViewController.view;
-        if (!hostView) {
+        if (!gameWin || !hostView) {
+            renplay_log_line("Keyboard show aborted: gameWin=%p hostView=%p", gameWin, hostView);
+            atomic_store(&g_kbd_visible, 0);
             return;
         }
+        hostView.userInteractionEnabled = YES;
         if (!g_kbd_field) {
-            g_kbd_field = [[RenPlayKeyboardField alloc] initWithFrame:CGRectMake(-120, -120, 20, 20)];
+            g_kbd_field = [[RenPlayKeyboardField alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
         }
         if (g_kbd_field.superview != hostView) {
             [g_kbd_field removeFromSuperview];
-            g_kbd_field.frame = CGRectMake(-120, -120, 20, 20);
-            [hostView insertSubview:g_kbd_field atIndex:0];
+            g_kbd_field.frame = CGRectMake(0, 0, 1, 1);
+            [hostView addSubview:g_kbd_field];
         }
-        if (!gameWin.isKeyWindow) {
-            [gameWin makeKeyWindow];
-        }
+        renplay_enable_sdl_text_events();
         [g_kbd_field resetToSentinel];
+        renplay_attempt_focus_keyboard_field(gameWin);
+
         if (![g_kbd_field isFirstResponder]) {
-            [g_kbd_field becomeFirstResponder];
+            atomic_store(&g_kbd_visible, 0);
+            // Retry on the next RunLoop turn when triggered mid-touch in GameOverlayWindow.
+            CFRunLoopTimerRef retryTimer = CFRunLoopTimerCreateWithHandler(
+                kCFAllocatorDefault,
+                CFAbsoluteTimeGetCurrent() + 0.03,
+                0,
+                0,
+                0,
+                ^(CFRunLoopTimerRef timer) {
+                    (void)timer;
+                    if (!g_kbd_field || atomic_load(&g_kbd_user_hidden) != 0) {
+                        return;
+                    }
+                    UIWindow *win = renplay_find_game_window();
+                    renplay_attempt_focus_keyboard_field(win);
+                    if (![g_kbd_field isFirstResponder]) {
+                        renplay_log_line(
+                            "Keyboard focus deferred failure: keyWin=%d canBecomeFirst=%d",
+                            win ? win.isKeyWindow : 0,
+                            [g_kbd_field canBecomeFirstResponder] ? 1 : 0
+                        );
+                    }
+                }
+            );
+            if (retryTimer != NULL) {
+                CFRunLoopAddTimer(CFRunLoopGetMain(), retryTimer, kCFRunLoopCommonModes);
+                CFRelease(retryTimer);
+            }
         }
-        atomic_store(&g_kbd_visible, 1);
     } else {
         g_programmatic_hide = 1;
         if (userInitiated && atomic_load(&g_engine_wants_text_input) != 0) {
@@ -743,9 +836,11 @@ static void renplay_set_keyboard_visible(BOOL show, BOOL userInitiated) {
     if ([NSThread isMainThread]) {
         renplay_set_keyboard_visible_on_main(show, userInitiated);
     } else {
-        dispatch_async(dispatch_get_main_queue(), ^{
+        CFRunLoopRef mainLoop = CFRunLoopGetMain();
+        CFRunLoopPerformBlock(mainLoop, kCFRunLoopCommonModes, ^{
             renplay_set_keyboard_visible_on_main(show, userInitiated);
         });
+        CFRunLoopWakeUp(mainLoop);
     }
 }
 
@@ -762,33 +857,23 @@ static void renplay_set_keyboard_visible(BOOL show, BOOL userInitiated) {
 
 @implementation RenPlayRuntimeBridge
 + (int)consumeCommand {
-    return atomic_exchange(&g_pending_command, 0);
+    return renplay_bridge_consume_command();
 }
 
 + (void)startTextInput {
-    atomic_store(&g_engine_wants_text_input, 1);
-    if (atomic_load(&g_kbd_user_hidden) == 0) {
-        renplay_set_keyboard_visible(YES, NO);
-    }
+    renplay_bridge_start_text_input();
 }
 
 + (void)stopTextInput {
-    atomic_store(&g_engine_wants_text_input, 0);
-    atomic_store(&g_kbd_user_hidden, 0);
-    if (atomic_exchange(&g_kbd_manual_open, 0) == 0) {
-        renplay_set_keyboard_visible(NO, NO);
-    }
+    renplay_bridge_stop_text_input();
 }
 
 + (int)isScreenKeyboardShown {
-    return (atomic_load(&g_kbd_visible) != 0 || atomic_load(&g_kbd_user_hidden) != 0) ? 1 : 0;
+    return renplay_bridge_is_keyboard_shown();
 }
 
 + (void)reopenIfEngineTextInputActive {
-    if (atomic_load(&g_engine_wants_text_input) != 0) {
-        atomic_store(&g_kbd_user_hidden, 0);
-        renplay_set_keyboard_visible(YES, YES);
-    }
+    renplay_bridge_reopen_if_active();
 }
 
 + (int)hasPendingKeyEvent {
@@ -858,10 +943,21 @@ static void renplay_install_crash_handlers(void) {
     }
 }
 
+static const void * volatile g_renplay_symbol_anchors[] = {
+    (const void *)&renplay_smb_pread,
+    (const void *)&renplay_bridge_consume_command,
+    (const void *)&renplay_bridge_start_text_input,
+    (const void *)&renplay_bridge_stop_text_input,
+    (const void *)&renplay_bridge_is_keyboard_shown,
+    (const void *)&renplay_bridge_reopen_if_active,
+    (const void *)&renplay_bridge_consume_key_event,
+};
+
 void renplay_install_sdl_scene_bridge(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         (void)renplay_ma_symbol_anchor;
+        (void)g_renplay_symbol_anchors[0];
         renplay_install_crash_handlers();
         Class cls = [UIWindow class];
         Method m1 = class_getInstanceMethod(cls, @selector(makeKeyAndVisible));
@@ -1018,6 +1114,13 @@ int renplay_launch_engine(
     g_active_sdl_version = sdlVersionHint;
     atomic_store(&g_pending_command, 0);
     atomic_store(&g_quit_in_progress, 0);
+    atomic_store(&g_kbd_visible, 0);
+    atomic_store(&g_engine_wants_text_input, 0);
+    atomic_store(&g_kbd_user_hidden, 0);
+    atomic_store(&g_kbd_manual_open, 0);
+    pthread_mutex_lock(&g_key_queue_lock);
+    [g_key_queue removeAllObjects];
+    pthread_mutex_unlock(&g_key_queue_lock);
 
     // librenpython resolves <dirname(argv[0])>/base/main.py and /base/lib/pythonX.Y.
     char argv0[2048];
@@ -1150,6 +1253,71 @@ void renplay_show_keyboard_from_ui(void) {
     renplay_set_keyboard_visible(YES, YES);
 }
 
+__attribute__((visibility("default"), used))
+int renplay_bridge_consume_command(void) {
+    return atomic_exchange(&g_pending_command, 0);
+}
+
+__attribute__((visibility("default"), used))
+void renplay_bridge_start_text_input(void) {
+    atomic_store(&g_engine_wants_text_input, 1);
+    if (atomic_load(&g_kbd_user_hidden) == 0) {
+        renplay_set_keyboard_visible(YES, NO);
+    }
+}
+
+__attribute__((visibility("default"), used))
+void renplay_bridge_stop_text_input(void) {
+    atomic_store(&g_engine_wants_text_input, 0);
+    atomic_store(&g_kbd_user_hidden, 0);
+    if (atomic_exchange(&g_kbd_manual_open, 0) == 0) {
+        renplay_set_keyboard_visible(NO, NO);
+    }
+}
+
+__attribute__((visibility("default"), used))
+int renplay_bridge_is_keyboard_shown(void) {
+    return (atomic_load(&g_kbd_visible) != 0 || atomic_load(&g_kbd_user_hidden) != 0) ? 1 : 0;
+}
+
+__attribute__((visibility("default"), used))
+void renplay_bridge_reopen_if_active(void) {
+    if (atomic_load(&g_engine_wants_text_input) != 0) {
+        atomic_store(&g_kbd_user_hidden, 0);
+        renplay_set_keyboard_visible(YES, YES);
+    }
+}
+
+__attribute__((visibility("default"), used))
+int renplay_bridge_consume_key_event(char *buf, size_t bufSize) {
+    if (!buf || bufSize == 0) {
+        return 0;
+    }
+    NSString *first = nil;
+    pthread_mutex_lock(&g_key_queue_lock);
+    if (g_key_queue != nil && g_key_queue.count > 0) {
+        first = [g_key_queue objectAtIndex:0];
+        [g_key_queue removeObjectAtIndex:0];
+    }
+    pthread_mutex_unlock(&g_key_queue_lock);
+    if (!first) {
+        buf[0] = '\0';
+        return 0;
+    }
+    const char *utf8 = first.UTF8String;
+    if (!utf8) {
+        buf[0] = '\0';
+        return 0;
+    }
+    size_t len = strlen(utf8);
+    if (len >= bufSize) {
+        len = bufSize - 1;
+    }
+    memcpy(buf, utf8, len);
+    buf[len] = '\0';
+    return (int)len;
+}
+
 #else
 
 void renplay_install_sdl_scene_bridge(void) {}
@@ -1200,6 +1368,15 @@ int renplay_should_show_keyboard_pill(void) { return 0; }
 void renplay_show_keyboard_from_ui(void) {}
 const char *renplay_get_log_file_path(void) { return NULL; }
 int renplay_has_sdl_window(void) { return 0; }
+int renplay_bridge_consume_command(void) { return 0; }
+void renplay_bridge_start_text_input(void) {}
+void renplay_bridge_stop_text_input(void) {}
+int renplay_bridge_is_keyboard_shown(void) { return 0; }
+void renplay_bridge_reopen_if_active(void) {}
+int renplay_bridge_consume_key_event(char *buf, size_t bufSize) {
+    if (buf && bufSize > 0) buf[0] = '\0';
+    return 0;
+}
 
 #endif
 

@@ -102,6 +102,14 @@ int renplay_smb_is_active(void);
 // Thread-safe byte-range read from the active SMB game mount for Ren'Py's Python ctypes loader.
 ssize_t renplay_smb_pread(const char *gameRelPath, uint64_t offset, void *buf, size_t length);
 
+// Pure-C runtime bridge functions called from Python via ctypes across Python 2.7 and 3.x.
+int renplay_bridge_consume_command(void);
+void renplay_bridge_start_text_input(void);
+void renplay_bridge_stop_text_input(void);
+int renplay_bridge_is_keyboard_shown(void);
+void renplay_bridge_reopen_if_active(void);
+int renplay_bridge_consume_key_event(char *buf, size_t bufSize);
+
 #ifdef __cplusplus
 }
 #endif
