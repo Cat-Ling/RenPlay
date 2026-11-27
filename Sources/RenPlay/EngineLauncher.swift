@@ -227,37 +227,36 @@ public final class EngineLauncher {
                     }
                 }
 
-                if showOverlay {
-                    self.overlayPollTimer?.invalidate()
-                    let timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] timer in
-                        guard let self else {
-                            timer.invalidate()
-                            return
-                        }
-                        if renplay_has_sdl_window() != 0 {
-                            timer.invalidate()
-                            MainActor.assumeIsolated {
-                                self.overlayPollTimer = nil
-                                self.installOverlay(
-                                    gameID: game.id,
-                                    gameName: gameTitle,
-                                    logDir: logDir,
-                                    opacity: overlayOpacity,
-                                    initialVolume: initialVolume,
-                                    showFPS: showFPS,
-                                    showQuickBar: showQuickBar,
-                                    mouseSpeed: mouseSpeed,
-                                    initialTransparentTextboxes: transparentTextboxes != 0,
-                                    initialVariants: variant.split(separator: " ").map(String.init),
-                                    screenshotDestMode: Int(screenshotMode),
-                                    initialGestures: gestures
-                                )
-                            }
+                self.overlayPollTimer?.invalidate()
+                let timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] timer in
+                    guard let self else {
+                        timer.invalidate()
+                        return
+                    }
+                    if renplay_has_sdl_window() != 0 {
+                        timer.invalidate()
+                        MainActor.assumeIsolated {
+                            self.overlayPollTimer = nil
+                            self.installOverlay(
+                                gameID: game.id,
+                                gameName: gameTitle,
+                                logDir: logDir,
+                                opacity: overlayOpacity,
+                                initialVolume: initialVolume,
+                                showFloatingButton: showOverlay,
+                                showFPS: showFPS,
+                                showQuickBar: showQuickBar,
+                                mouseSpeed: mouseSpeed,
+                                initialTransparentTextboxes: transparentTextboxes != 0,
+                                initialVariants: variant.split(separator: " ").map(String.init),
+                                screenshotDestMode: Int(screenshotMode),
+                                initialGestures: gestures
+                            )
                         }
                     }
-                    RunLoop.main.add(timer, forMode: .common)
-                    self.overlayPollTimer = timer
                 }
+                RunLoop.main.add(timer, forMode: .common)
+                self.overlayPollTimer = timer
 
                 var errBuf = [CChar](repeating: 0, count: 1024)
                 let rc = renplay_launch_engine(
@@ -346,6 +345,7 @@ public final class EngineLauncher {
         logDir: URL,
         opacity: Double,
         initialVolume: Double,
+        showFloatingButton: Bool,
         showFPS: Bool,
         showQuickBar: Bool,
         mouseSpeed: Double,
@@ -368,6 +368,7 @@ public final class EngineLauncher {
             logDir: logDir,
             opacity: opacity,
             initialVolume: initialVolume,
+            showFloatingButton: showFloatingButton,
             showFPS: showFPS,
             showQuickBar: showQuickBar,
             mouseSpeed: mouseSpeed,
@@ -1161,6 +1162,22 @@ public final class EngineLauncher {
         except Exception:
             pass
 
+        _renplay_ctrl_exc_list = []
+        for _exc_holder, _exc_names in (
+            (getattr(renpy, "game", None), (
+                "RestartContext", "RestartTopContext", "FullRestartException",
+                "UtterRestartException", "QuitException", "JumpException",
+                "JumpOutException", "CallException", "EndReplay",
+            )),
+            (getattr(renpy.display, "core", None), ("IgnoreEvent", "EndInteraction")),
+        ):
+            if _exc_holder is not None:
+                for _ename in _exc_names:
+                    _ecls = getattr(_exc_holder, _ename, None)
+                    if _ecls is not None:
+                        _renplay_ctrl_exc_list.append(_ecls)
+        _renplay_control_exceptions = tuple(_renplay_ctrl_exc_list)
+
         def _renplay_open_menu_screen(screen_name):
             try:
                 in_menu = bool(renpy.context()._menu)
@@ -1189,15 +1206,32 @@ public final class EngineLauncher {
                     renpy.run(ShowMenu(resolved))
                 else:
                     _invoke_game_menu()
+            except _renplay_control_exceptions:
+                raise
             except Exception:
                 pass
 
         try:
+            for _ev_key in (
+                "renplay_save_menu",
+                "renplay_load_menu",
+                "renplay_history_menu",
+                "renplay_prefs_menu",
+                "renplay_quicksave",
+                "renplay_quickload",
+            ):
+                config.keymap.setdefault(_ev_key, [])
+                try:
+                    renpy.display.behavior.event_cache.pop(_ev_key, None)
+                except Exception:
+                    pass
             _renplay_keymap = renpy.Keymap(
                 renplay_save_menu=lambda: _renplay_open_menu_screen("save"),
                 renplay_load_menu=lambda: _renplay_open_menu_screen("load"),
                 renplay_history_menu=lambda: _renplay_open_menu_screen("history"),
                 renplay_prefs_menu=lambda: _renplay_open_menu_screen("preferences"),
+                renplay_quicksave=QuickSave(),
+                renplay_quickload=QuickLoad(confirm=False),
             )
             if _renplay_keymap not in config.underlay:
                 config.underlay.append(_renplay_keymap)
@@ -1604,12 +1638,12 @@ public final class EngineLauncher {
                     _renplay_trust_autoload = True
                     try:
                         renpy.run(FileLoad(_slot, confirm=False, slot=True))
-                    except (renpy.game.RestartTopContext, renpy.game.RestartContext):
+                    except _renplay_control_exceptions:
                         raise
                     except Exception:
                         try:
                             renpy.load(_slot)
-                        except (renpy.game.RestartTopContext, renpy.game.RestartContext):
+                        except _renplay_control_exceptions:
                             raise
                         except Exception:
                             pass
@@ -1774,9 +1808,9 @@ public final class EngineLauncher {
                     elif cmd == 6:
                         renpy.queue_event("screenshot")
                     elif cmd == 7:
-                        renpy.run(QuickSave())
+                        renpy.queue_event("renplay_quicksave")
                     elif cmd == 8:
-                        renpy.run(QuickLoad(confirm=False))
+                        renpy.queue_event("renplay_quickload")
                     elif cmd == 11:
                         renpy.queue_event("renplay_save_menu")
                     elif cmd == 12:
@@ -1785,6 +1819,8 @@ public final class EngineLauncher {
                         renpy.queue_event("renplay_history_menu")
                     elif cmd == 14:
                         renpy.queue_event("renplay_prefs_menu")
+                except _renplay_control_exceptions:
+                    raise
                 except Exception:
                     pass
 

@@ -248,7 +248,10 @@ struct GlobalSavesView: View {
                 set: { if !$0 { exportedZipURL = nil } }
             )) {
                 if let url = exportedZipURL {
-                    ShareLink("Share Archive", item: url)
+                    Button("Share Archive") {
+                        exportedZipURL = nil
+                        SharePresenter.present(urls: [url], delay: 0.2)
+                    }
                 }
                 Button("Done", role: .cancel) { exportedZipURL = nil }
             } message: {
@@ -613,7 +616,9 @@ struct GameSaveManagerView: View {
                         }
                     }
                     if let exportedZipURL {
-                        ShareLink("Share All Saves (.zip)", item: exportedZipURL)
+                        Button("Share All Saves (.zip)", systemImage: "square.and.arrow.up") {
+                            SharePresenter.present(urls: [exportedZipURL], delay: 0.2)
+                        }
                     }
                     if gameID != nil {
                         Divider()
@@ -1061,7 +1066,9 @@ private struct SaveSlotDetailSheet: View {
                 }
 
                 Section {
-                    ShareLink("Share Save File", item: saveFileURL)
+                    Button("Share Save File", systemImage: "square.and.arrow.up") {
+                        SharePresenter.present(urls: [saveFileURL], delay: 0.05)
+                    }
                     Button("Delete Save", role: .destructive, action: onDelete)
                 }
             }

@@ -13,6 +13,7 @@ public final class AppState {
     public let libraryStore: LibraryStore
     public let saveManager = SaveManager()
     public let launcher: EngineLauncher
+    let wifiServer = LocalWiFiUploadServer()
 
     public var games: [GameEntry] = []
     public var smbServers: [SMBServerProfile] = []
@@ -33,6 +34,7 @@ public final class AppState {
         let store = LibraryStore(rootDir: root)
         store.seedVisibleDocumentsFolderIfNeeded(documentsDir: docs)
         AIHelp.install(documentsDir: docs)
+        Self.cleanupStaleTemporaryDirectories()
         self.documentsDir = docs
         self.libraryStore = store
         self.appSettings = store.loadSettings()
@@ -49,6 +51,26 @@ public final class AppState {
             return manifest
         }
         return EngineManifest(engines: [])
+    }
+
+    private static func cleanupStaleTemporaryDirectories() {
+        DispatchQueue.global(qos: .utility).async {
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory
+            guard let items = try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil) else { return }
+            let stalePrefixes = [
+                "renplay-wifi-",
+                "renplay-import-",
+                "renplay-dl-",
+                "renplay-save-import-",
+            ]
+            for url in items {
+                let name = url.lastPathComponent
+                if name == "RenPlayDiagnostics" || stalePrefixes.contains(where: { name.hasPrefix($0) }) {
+                    try? fm.removeItem(at: url)
+                }
+            }
+        }
     }
 
     public func showError(_ message: String, title: String = "Error") {

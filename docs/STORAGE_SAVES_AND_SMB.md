@@ -25,6 +25,7 @@ Internal library root under `Documents/RenPlay/`:
 
 - Supports `.zip` (ZIP64, Deflate, BZip2, LZMA, Zstandard method `93`), `.7z`, `.rar`, `.tar.*`, `.apk` (stripping `assets/x-` mobile prefixes automatically), and loose folders (`UIDocumentPickerViewController` copy, in-place coordinated copy, URL download, Files dropzones, and `LocalWiFiUploadServer` HTTP uploads).
 - RenPlay inspects archive layouts via `locateGameRoot(inside:)` to find the game directory regardless of archive nesting depth.
+- `LocalWiFiUploadServer` lives on `AppState`. If the user dismisses the Wi-Fi Transfer sheet while an upload or extraction is running, the server remains active (with a live progress banner in `LibraryView` to reopen the sheet) until all active transfers finish importing, then stops automatically and removes temporary staging files. Tapping **Stop** tears down active transfer sockets and deletes partial staging directories right away, and app startup sweeps stale temporary transfer folders from prior sessions.
 
 ## 3. SMBv2 / SMBv3 LAN Streaming ([SMBClient.swift](../Sources/RenPlayCore/SMBClient.swift), [CSMB2](../Sources/CSMB2))
 

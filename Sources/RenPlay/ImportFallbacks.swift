@@ -183,6 +183,7 @@ struct WiFiTransferJob: Identifiable, Sendable, Codable, Equatable {
 private final class UploadSocketHolder: @unchecked Sendable {
     private let lock = NSLock()
     private var fd: Int32 = -1
+    private var activeClients = Set<Int32>()
     private var stopped = false
     private var snapshotJSON = Data("{\"jobs\":[]}".utf8)
 
@@ -190,6 +191,22 @@ private final class UploadSocketHolder: @unchecked Sendable {
         lock.lock()
         fd = newFD
         stopped = false
+        lock.unlock()
+    }
+
+    func registerClient(_ clientFD: Int32) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if stopped {
+            return false
+        }
+        activeClients.insert(clientFD)
+        return true
+    }
+
+    func unregisterClient(_ clientFD: Int32) {
+        lock.lock()
+        activeClients.remove(clientFD)
         lock.unlock()
     }
 
@@ -202,6 +219,22 @@ private final class UploadSocketHolder: @unchecked Sendable {
         if cur >= 0 {
             Darwin.shutdown(cur, SHUT_RDWR)
             Darwin.close(cur)
+        }
+    }
+
+    func forceStopAll() {
+        lock.lock()
+        stopped = true
+        let cur = fd
+        fd = -1
+        let clients = Array(activeClients)
+        lock.unlock()
+        if cur >= 0 {
+            Darwin.shutdown(cur, SHUT_RDWR)
+            Darwin.close(cur)
+        }
+        for cfd in clients {
+            Darwin.shutdown(cfd, SHUT_RDWR)
         }
     }
 
@@ -241,8 +274,56 @@ final class LocalWiFiUploadServer {
     var jobs: [WiFiTransferJob] = []
     var errorMessage: String?
 
+    var isRunning: Bool { serverURLString != nil }
+    var hasActiveTransfers: Bool {
+        jobs.contains { $0.phase == .receiving || $0.phase == .importing }
+    }
+
     private let socketHolder = UploadSocketHolder()
+    private var stopWhenIdle = false
     private var onImportUpload: ((URL, @escaping @Sendable (Double, String) -> Void) async -> Result<GameEntry, Error>)?
+
+    func handleSheetOpened(
+        onImportUpload: @escaping (URL, @escaping @Sendable (Double, String) -> Void) async -> Result<GameEntry, Error>
+    ) {
+        self.onImportUpload = onImportUpload
+        stopWhenIdle = false
+        if isRunning {
+            if !hasActiveTransfers {
+                statusText = "Waiting for files"
+            }
+            return
+        }
+        start(onImportUpload: onImportUpload)
+    }
+
+    func handleSheetClosed() {
+        if hasActiveTransfers {
+            stopWhenIdle = true
+        } else {
+            stopWhenIdle = false
+            stop()
+        }
+    }
+
+    func cancelAllAndStop() {
+        stopWhenIdle = false
+        socketHolder.forceStopAll()
+        serverURLString = nil
+        for idx in jobs.indices where jobs[idx].phase == .receiving {
+            jobs[idx].phase = .failed
+            jobs[idx].message = "Transfer cancelled"
+        }
+        statusText = "Transfer cancelled"
+        syncStatusSnapshot()
+    }
+
+    private func checkStopIfIdle() {
+        if stopWhenIdle && !hasActiveTransfers {
+            stopWhenIdle = false
+            stop()
+        }
+    }
 
     func start(
         onImportUpload: @escaping (URL, @escaping @Sendable (Double, String) -> Void) async -> Result<GameEntry, Error>
@@ -251,7 +332,7 @@ final class LocalWiFiUploadServer {
         self.onImportUpload = onImportUpload
         self.errorMessage = nil
         self.statusText = "Starting server..."
-        self.jobs = []
+        self.jobs = Array(jobs.filter { $0.phase == .completed }.prefix(20))
         syncStatusSnapshot()
 
         let holder = socketHolder
@@ -312,9 +393,14 @@ final class LocalWiFiUploadServer {
                     }
                     break
                 }
+                guard holder.registerClient(clientFD) else {
+                    Darwin.close(clientFD)
+                    break
+                }
                 DispatchQueue.global(qos: .utility).async {
                     Self.handleClient(
                         clientFD,
+                        socketHolder: holder,
                         statusSnapshotProvider: { holder.getStatusSnapshot() },
                         onReceiveStart: { jobID, filename, total in
                             Task { @MainActor in
@@ -333,7 +419,11 @@ final class LocalWiFiUploadServer {
                         },
                         onComplete: { jobID, uploadedURL in
                             Task { @MainActor in
-                                await weakRef.server?.handleUploadedFile(id: jobID, tempURL: uploadedURL)
+                                if let server = weakRef.server {
+                                    await server.handleUploadedFile(id: jobID, tempURL: uploadedURL)
+                                } else {
+                                    try? FileManager.default.removeItem(at: uploadedURL.deletingLastPathComponent())
+                                }
                             }
                         }
                     )
@@ -374,11 +464,15 @@ final class LocalWiFiUploadServer {
             jobs[idx].phase = .failed
             jobs[idx].message = message
         }
-        statusText = "Transfer failed"
+        statusText = hasActiveTransfers ? statusText : "Transfer failed"
         syncStatusSnapshot()
+        checkStopIfIdle()
     }
 
     private func handleUploadedFile(id: String, tempURL: URL) async {
+        defer {
+            try? FileManager.default.removeItem(at: tempURL.deletingLastPathComponent())
+        }
         if let idx = jobs.firstIndex(where: { $0.id == id }) {
             jobs[idx].phase = .importing
             jobs[idx].progress = 0.02
@@ -388,7 +482,10 @@ final class LocalWiFiUploadServer {
         statusText = "Importing \(tempURL.lastPathComponent)..."
         syncStatusSnapshot()
 
-        guard let onImportUpload else { return }
+        guard let onImportUpload else {
+            recordFailure(id: id, message: "Importer unavailable")
+            return
+        }
         let weakRef = WeakUploadServerRef(self)
         let result = await onImportUpload(tempURL) { frac, msg in
             Task { @MainActor in
@@ -401,21 +498,23 @@ final class LocalWiFiUploadServer {
             }
         }
 
-        guard let idx = jobs.firstIndex(where: { $0.id == id }) else { return }
-        switch result {
-        case .success(let entry):
-            jobs[idx].phase = .completed
-            jobs[idx].progress = 1.0
-            jobs[idx].gameTitle = entry.displayName
-            jobs[idx].engineVersion = entry.detectedEngineVersion
-            jobs[idx].message = "Added to Library"
-            statusText = "Added \(entry.displayName)"
-        case .failure(let error):
-            jobs[idx].phase = .failed
-            jobs[idx].message = error.localizedDescription
-            statusText = "Import failed"
+        if let idx = jobs.firstIndex(where: { $0.id == id }) {
+            switch result {
+            case .success(let entry):
+                jobs[idx].phase = .completed
+                jobs[idx].progress = 1.0
+                jobs[idx].gameTitle = entry.displayName
+                jobs[idx].engineVersion = entry.detectedEngineVersion
+                jobs[idx].message = "Added to Library"
+                statusText = "Added \(entry.displayName)"
+            case .failure(let error):
+                jobs[idx].phase = .failed
+                jobs[idx].message = error.localizedDescription
+                statusText = "Import failed"
+            }
         }
         syncStatusSnapshot()
+        checkStopIfIdle()
     }
 
     private func syncStatusSnapshot() {
@@ -452,13 +551,17 @@ final class LocalWiFiUploadServer {
 
     nonisolated private static func handleClient(
         _ fd: Int32,
+        socketHolder: UploadSocketHolder,
         statusSnapshotProvider: () -> Data,
         onReceiveStart: @escaping @Sendable (String, String, Int64) -> Void,
         onReceiveProgress: @escaping @Sendable (String, Int64, Int64) -> Void,
         onReceiveFailed: @escaping @Sendable (String, String) -> Void,
         onComplete: @escaping @Sendable (String, URL) -> Void
     ) {
-        defer { Darwin.close(fd) }
+        defer {
+            socketHolder.unregisterClient(fd)
+            Darwin.close(fd)
+        }
 
         var headerData = Data()
         var chunk = [UInt8](repeating: 0, count: 8192)
@@ -770,8 +873,9 @@ final class LocalWiFiUploadServer {
 struct WiFiUploadSheetView: View {
     @Bindable var appState: AppState
     @Environment(\.dismiss) private var dismiss
-    @State private var server = LocalWiFiUploadServer()
     @State private var copiedAddress = false
+
+    private var server: LocalWiFiUploadServer { appState.wifiServer }
 
     var body: some View {
         NavigationStack {
@@ -805,7 +909,7 @@ struct WiFiUploadSheetView: View {
                 } header: {
                     Text("Browser Address")
                 } footer: {
-                    Text("Keep this sheet open while transferring files. Imports start automatically once uploaded.")
+                    Text("Closing this sheet keeps active uploads running until they finish importing. When idle, closing stops the server.")
                 }
 
                 Section("Transfers") {
@@ -842,17 +946,25 @@ struct WiFiUploadSheetView: View {
             .navigationTitle("Wi-Fi Transfer")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                if server.hasActiveTransfers {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Stop", role: .destructive) {
+                            server.cancelAllAndStop()
+                            dismiss()
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
                 }
             }
             .onAppear {
-                server.start { tempURL, progress in
+                server.handleSheetOpened { tempURL, progress in
                     await appState.importUploadedArchive(at: tempURL, progress: progress)
                 }
             }
             .onDisappear {
-                server.stop()
+                server.handleSheetClosed()
             }
         }
     }

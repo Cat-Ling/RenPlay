@@ -63,6 +63,10 @@ struct LibraryView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     importBannerCard
 
+                    if appState.wifiServer.hasActiveTransfers && !showWiFiUpload {
+                        wifiTransferBanner
+                    }
+
                     if appState.games.isEmpty && !appState.isImporting {
                         emptyLibraryCard
                     } else {
@@ -167,7 +171,10 @@ struct LibraryView: View {
                 set: { if !$0 { exportedBackupURL = nil } }
             )) {
                 if let url = exportedBackupURL {
-                    ShareLink("Share Archive", item: url)
+                    Button("Share Archive") {
+                        exportedBackupURL = nil
+                        SharePresenter.present(urls: [url], delay: 0.2)
+                    }
                 }
                 Button("Done", role: .cancel) { exportedBackupURL = nil }
             } message: {
@@ -226,6 +233,42 @@ struct LibraryView: View {
                 )
             )
             .clipShape(.rect(cornerRadius: 14))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var wifiTransferBanner: some View {
+        let activeJob = appState.wifiServer.jobs.first(where: { $0.phase == .receiving || $0.phase == .importing })
+        Button {
+            showWiFiUpload = true
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    Image(systemName: "wifi")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.blue)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(activeJob?.filename ?? "Wi-Fi Transfer")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Text(activeJob.map { "\($0.phase == .importing ? "Importing" : "Uploading") • \(Int($0.progress * 100))%" } ?? appState.wifiServer.statusText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                if let activeJob {
+                    ProgressView(value: activeJob.progress)
+                }
+            }
+            .padding(12)
+            .background(Color(.secondarySystemGroupedBackground))
+            .clipShape(.rect(cornerRadius: 12))
         }
         .buttonStyle(.plain)
     }

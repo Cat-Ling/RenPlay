@@ -149,7 +149,7 @@ UI toggles; players never edit env vars directly:
 6. READING THE LOGS
 ==========================================================================
 Files shared (when present in the game's log folder):
-- renplay_session.log: combined stdout/stderr plus [RenPlay] native bridge
+- renplay_session.log.txt: combined stdout/stderr plus [RenPlay] bridge
   lines (glGetString MetalANGLE renderer, dlopen status, SMB mount notes).
 - traceback.txt: Ren'Py's formatted Python exception traceback and script
   location when a Ren'Py script error occurred.

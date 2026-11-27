@@ -148,6 +148,51 @@ def check_docs_links_and_vars(code_corpus: str) -> None:
             check(not missing, f"{rel} RENPY_* vars exist in code (missing: {missing})")
 
 
+def check_keymap_specifiers() -> None:
+    ov_path = ROOT / "scripts/99renplay_overrides.rpy"
+    text = ov_path.read_text(encoding="utf-8")
+
+    queued = set(re.findall(r'renpy\.queue_event\(\s*"([^"]+)"\s*\)', text))
+    builtin_events = {
+        "game_menu",
+        "rollback",
+        "toggle_skip",
+        "toggle_afm",
+        "hide_windows",
+        "screenshot",
+    }
+    registered_custom = set(re.findall(r'config\.keymap\.setdefault\(\s*"([^"]+)"\s*,\s*\[\s*\]\s*\)', text))
+    # Also detect `for _ev_key in (...): config.keymap.setdefault(_ev_key, [])`.
+    ov_py = textwrap.dedent(text.split("init 999 python:\n", 1)[1])
+    for node in ast.walk(ast.parse(ov_py)):
+        if isinstance(node, ast.For) and isinstance(node.iter, (ast.Tuple, ast.List)):
+            body_src = "\n".join(ast.unparse(s) for s in node.body)
+            if "config.keymap.setdefault(" in body_src:
+                for elt in node.iter.elts:
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                        registered_custom.add(elt.value)
+
+    # Every Keymap(...) kwarg in 99renplay_overrides must be in config.keymap or built-in.
+    keymap_match = re.search(r"renpy\.Keymap\((.*?)\)", text, re.S)
+    keymap_keys: set[str] = set()
+    if keymap_match:
+        keymap_keys = set(re.findall(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=", keymap_match.group(1), re.M))
+        keymap_keys -= {"replaces", "activate_sound", "capture"}
+
+    all_used = queued | keymap_keys
+    unregistered = sorted(k for k in all_used if k not in builtin_events and k not in registered_custom)
+    check(not unregistered, f"all Keymap/queue_event specifiers registered in config.keymap (missing: {unregistered})")
+
+    engines_dir = ROOT / "BundleResources/Engines"
+    if engines_dir.is_dir():
+        import zipfile
+        for zip_path in sorted(engines_dir.glob("*.zip")):
+            with zipfile.ZipFile(zip_path) as zf:
+                km = zf.read("base/renpy/common/00keymap.rpy").decode("utf-8", "replace")
+                missing_builtin = sorted(e for e in (queued & builtin_events) if f"{e} =" not in km and f"{e}=" not in km)
+                check(not missing_builtin, f"{zip_path.name} defines built-in keymap events (missing: {missing_builtin})")
+
+
 def check_privacy_and_hygiene() -> None:
     leaks: list[str] = []
     for path in ROOT.rglob("*"):
@@ -171,6 +216,7 @@ def main() -> int:
     corpus = collect_code_corpus()
     check_ai_guide(corpus)
     check_script_parity()
+    check_keymap_specifiers()
     check_docs_links_and_vars(corpus)
     check_privacy_and_hygiene()
     print("PASS" if failures == 0 else f"FAIL ({failures})")

@@ -7,11 +7,59 @@ import RenPlayCore
 import SwiftUI
 import UIKit
 
+@MainActor
+enum SharePresenter {
+    private static var retainedFolder: URL?
+
+    static func present(urls: [URL], retainFolder: URL? = nil, delay: TimeInterval = 0.15) {
+        let validURLs = urls.filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard !validURLs.isEmpty else { return }
+        retainedFolder = retainFolder
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            presentNow(urls: validURLs)
+        }
+    }
+
+    private static func presentNow(urls: [URL]) {
+        guard let topVC = topViewController() else { return }
+        let activityVC = UIActivityViewController(activityItems: urls, applicationActivities: nil)
+        if let pop = activityVC.popoverPresentationController {
+            pop.sourceView = topVC.view
+            pop.sourceRect = CGRect(
+                x: topVC.view.bounds.midX,
+                y: topVC.view.bounds.midY,
+                width: 1,
+                height: 1
+            )
+            pop.permittedArrowDirections = []
+        }
+        topVC.present(activityVC, animated: true)
+    }
+
+    private static func topViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let activeScene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
+        let candidateWindows = activeScene?.windows.filter {
+            !$0.isHidden && $0.rootViewController != nil && !($0 is GameOverlayWindow)
+        } ?? []
+        let window = candidateWindows.first(where: { $0.isKeyWindow }) ?? candidateWindows.first
+        guard var current = window?.rootViewController else { return nil }
+        while let presented = current.presentedViewController, !presented.isBeingDismissed {
+            current = presented
+        }
+        return current
+    }
+}
+
 enum AIHelp {
     static let fileName = "Give-to-AI-with-logs.txt"
 
     static var bundledURL: URL? {
         Bundle.main.url(forResource: "Give-to-AI-with-logs", withExtension: "txt")
+            ?? {
+                let direct = Bundle.main.bundleURL.appendingPathComponent(fileName)
+                return FileManager.default.fileExists(atPath: direct.path) ? direct : nil
+            }()
     }
 
     static func install(documentsDir: URL) {
@@ -25,19 +73,34 @@ enum AIHelp {
     }
 
     @MainActor
-    static func stagedFiles(appState: AppState, game: GameEntry?) -> [URL] {
+    static func share(appState: AppState, game: GameEntry?, delay: TimeInterval = 0.15) {
+        do {
+            let result = try stagedFiles(appState: appState, game: game)
+            guard !result.urls.isEmpty else {
+                appState.showError("No diagnostic files could be prepared for sharing.", title: "Share Unavailable")
+                return
+            }
+            SharePresenter.present(urls: result.urls, retainFolder: result.folder, delay: delay)
+        } catch {
+            appState.showError(error.localizedDescription, title: "Share Diagnostics Failed")
+        }
+    }
+
+    @MainActor
+    static func stagedFiles(appState: AppState, game: GameEntry?) throws -> (folder: URL, urls: [URL]) {
         install(documentsDir: appState.documentsDir)
         let fm = FileManager.default
-        let stagingDir = fm.temporaryDirectory.appendingPathComponent("RenPlayAIHelp", isDirectory: true)
+        let stagingDir = fm.temporaryDirectory.appendingPathComponent("RenPlayDiagnostics", isDirectory: true)
         try? fm.removeItem(at: stagingDir)
-        try? fm.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: stagingDir, withIntermediateDirectories: true)
 
         var output: [URL] = []
+        let guideDst = stagingDir.appendingPathComponent(fileName)
         let docsGuide = appState.documentsDir.appendingPathComponent(fileName)
-        if fm.fileExists(atPath: docsGuide.path) {
-            output.append(docsGuide)
-        } else if let bundled = bundledURL {
-            output.append(bundled)
+        if let src = bundledURL ?? (fm.fileExists(atPath: docsGuide.path) ? docsGuide : nil),
+           let data = try? Data(contentsOf: src) {
+            try data.write(to: guideDst, options: .atomic)
+            output.append(guideDst)
         }
 
         let targetGame = game ?? appState.games
@@ -45,52 +108,63 @@ enum AIHelp {
             .max(by: { ($0.lastPlayedAt ?? .distantPast) < ($1.lastPlayedAt ?? .distantPast) })
             ?? appState.games.first
 
-        let settingsURL = stagingDir.appendingPathComponent(
-            targetGame.map { "\(safeFilename($0.displayName))-settings.txt" } ?? "renplay-settings.txt"
-        )
-        let summaryText = buildSettingsSummary(appState: appState, game: targetGame)
-        if (try? summaryText.write(to: settingsURL, atomically: true, encoding: .utf8)) != nil {
-            output.append(settingsURL)
-        }
-
-        guard let targetGame else { return output }
-
-        let containerRoot = appState.documentsDir.deletingLastPathComponent().path
-        let bundlePath = Bundle.main.bundleURL.path
-        let searchDirs = [
-            appState.libraryStore.logDirectory(for: targetGame),
-            appState.libraryStore.gameDirectory(for: targetGame),
-        ]
-        var addedLogs = Set<String>()
-        for dir in searchDirs {
-            for name in ["renplay_session.log", "traceback.txt", "log.txt"] where !addedLogs.contains(name) {
-                let src = dir.appendingPathComponent(name)
-                guard fm.fileExists(atPath: src.path),
-                      let raw = try? String(contentsOf: src, encoding: .utf8) else { continue }
-                let trimmed = raw.count > 256_000 ? String(raw.suffix(256_000)) : raw
-                let scrubbed = DiagnosticScrubber.scrub(
-                    trimmed,
-                    containerRoot: containerRoot,
-                    bundlePath: bundlePath,
-                    smbSource: targetGame.remoteSource
-                )
-                let dst = stagingDir.appendingPathComponent(name)
-                if (try? scrubbed.write(to: dst, atomically: true, encoding: .utf8)) != nil {
+        var includedLogs: [String] = []
+        if let targetGame {
+            let containerRoot = appState.documentsDir.deletingLastPathComponent().path
+            let bundlePath = Bundle.main.bundleURL.path
+            let searchDirs = [
+                appState.libraryStore.logDirectory(for: targetGame),
+                appState.libraryStore.gameDirectory(for: targetGame),
+            ]
+            let candidates: [(source: String, dest: String)] = [
+                ("renplay_session.log", "renplay_session.log.txt"),
+                ("traceback.txt", "traceback.txt"),
+                ("log.txt", "log.txt"),
+            ]
+            var seenSources = Set<String>()
+            for dir in searchDirs {
+                for candidate in candidates where !seenSources.contains(candidate.source) {
+                    let src = dir.appendingPathComponent(candidate.source)
+                    guard fm.fileExists(atPath: src.path),
+                          let raw = try? String(contentsOf: src, encoding: .utf8) else { continue }
+                    let trimmed = raw.count > 256_000 ? String(raw.suffix(256_000)) : raw
+                    let scrubbed = DiagnosticScrubber.scrub(
+                        trimmed,
+                        containerRoot: containerRoot,
+                        bundlePath: bundlePath,
+                        smbSource: targetGame.remoteSource
+                    )
+                    let dst = stagingDir.appendingPathComponent(candidate.dest)
+                    try scrubbed.write(to: dst, atomically: true, encoding: .utf8)
                     output.append(dst)
-                    addedLogs.insert(name)
+                    seenSources.insert(candidate.source)
+                    includedLogs.append(candidate.dest)
                 }
             }
         }
-        return output
+
+        let settingsURL = stagingDir.appendingPathComponent(
+            targetGame.map { "\(safeFilename($0.displayName))-settings.txt" } ?? "renplay-settings.txt"
+        )
+        let summaryText = buildSettingsSummary(appState: appState, game: targetGame, includedLogs: includedLogs)
+        try summaryText.write(to: settingsURL, atomically: true, encoding: .utf8)
+        output.insert(settingsURL, at: min(1, output.count))
+
+        return (stagingDir, output)
     }
 
     @MainActor
-    private static func buildSettingsSummary(appState: AppState, game: GameEntry?) -> String {
+    private static func buildSettingsSummary(
+        appState: AppState,
+        game: GameEntry?,
+        includedLogs: [String]
+    ) -> String {
         var lines = [
             "# RenPlay Diagnostics Summary (privacy-scrubbed)",
             "# Bundle ID: \(Bundle.main.bundleIdentifier ?? "RenPlay")",
             "# App Version: \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")",
             "# Bundled Engines: \(appState.engines.map { "\($0.version) (\($0.sdlVersion)/Py\($0.pythonVersion))" }.joined(separator: ", "))",
+            "# Logs Included: \(includedLogs.isEmpty ? "none recorded yet" : includedLogs.joined(separator: ", "))",
             "",
         ]
 
@@ -150,37 +224,16 @@ private extension JSONEncoder {
     }
 }
 
-private struct AIHelpActivityItem: Identifiable {
-    let id = UUID()
-    let urls: [URL]
-}
-
-private struct AIHelpActivitySheet: UIViewControllerRepresentable {
-    let items: [URL]
-
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
-    }
-
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
-}
-
 struct AIHelpButton: View {
     let appState: AppState
     let game: GameEntry?
     var label = "Share Diagnostics for AI"
     var systemImage = "questionmark.bubble"
-    @State private var staged: AIHelpActivityItem?
+    var delay: TimeInterval = 0.15
 
     var body: some View {
         Button(label, systemImage: systemImage) {
-            let urls = AIHelp.stagedFiles(appState: appState, game: game)
-            if !urls.isEmpty {
-                staged = AIHelpActivityItem(urls: urls)
-            }
-        }
-        .sheet(item: $staged) { item in
-            AIHelpActivitySheet(items: item.urls)
+            AIHelp.share(appState: appState, game: game, delay: delay)
         }
     }
 }

@@ -30,7 +30,7 @@ Gesture bindings live in `GestureProfile` ([Models.swift](../Sources/RenPlayCore
 - **Touch-Mouse Race Suppression**:
   - Swizzled `-[UIWindow renplay_sendEvent:]` inspects active touch counts on `SDL_uikitwindow`. Whenever `>= 2` touches are active, it raises `g_multitouch_active` and extends `g_multitouch_suppress_until_ms` by `220ms` after lift-off.
   - When Safe Mode is off, `99renplay_overrides.rpy` wraps `renpy.display.controller.event` to drop SDL `MOUSEBUTTONDOWN`/`MOUSEBUTTONUP`/`MOUSEMOTION` events while `renplay_bridge_should_suppress_touch_mouse() != 0`, and cancels Ren'Py's own internal gesture recognizer, preventing two-finger gestures from advancing dialogue. Events tagged `renplay_virtual=True` bypass this filter so Virtual Mouse right-clicks keep working cleanly.
-- **In-Game Menu Shortcuts**: `_renplay_open_menu_screen` maps `save`, `load`, `history` (`text_history`), and `preferences` safely via `renpy.Keymap` and `ShowMenu(...)`.
+- **In-Game Menu Shortcuts**: Custom events (`renplay_save_menu`, `renplay_load_menu`, `renplay_history_menu`, `renplay_prefs_menu`, `renplay_quicksave`, `renplay_quickload`) are registered in `config.keymap` (`[]`) before constructing `_renplay_keymap = renpy.Keymap(...)` on `config.underlay`, and handlers re-raise Ren'Py control-flow exceptions (`RestartTopContext`, `JumpException`, `CallException`, etc.). `_renplay_open_menu_screen` maps `save`, `load`, `history` (`text_history`), and `preferences` via `ShowMenu(...)`.
 
 ## 4. Native iOS Keyboard Bridge
 

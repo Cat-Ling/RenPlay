@@ -16,6 +16,7 @@ final class GameOverlayWindow: UIWindow {
         logDir: URL,
         opacity: Double,
         initialVolume: Double,
+        showFloatingButton: Bool,
         showFPS: Bool,
         showQuickBar: Bool,
         mouseSpeed: Double,
@@ -32,6 +33,7 @@ final class GameOverlayWindow: UIWindow {
             logDir: logDir,
             opacity: opacity,
             initialVolume: initialVolume,
+            showFloatingButton: showFloatingButton,
             showFPS: showFPS,
             showQuickBar: showQuickBar,
             mouseSpeed: mouseSpeed,
@@ -90,6 +92,7 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
 
     private var overlayAlpha: CGFloat
     private var volumeValue: Float
+    private let showFloatingButton: Bool
     private var showFPS: Bool
     private var showQuickBar: Bool
     private var mouseSpeed: CGFloat
@@ -171,6 +174,7 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         logDir: URL,
         opacity: Double,
         initialVolume: Double,
+        showFloatingButton: Bool,
         showFPS: Bool,
         showQuickBar: Bool,
         mouseSpeed: Double,
@@ -186,6 +190,7 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
         self.logDir = logDir
         self.overlayAlpha = CGFloat(min(max(opacity, 0.35), 1.0))
         self.volumeValue = Float(min(max(initialVolume, 0.0), 1.0))
+        self.showFloatingButton = showFloatingButton
         self.showFPS = showFPS
         self.showQuickBar = showQuickBar
         self.mouseSpeed = CGFloat(min(max(mouseSpeed, 0.4), 2.5))
@@ -263,7 +268,7 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
             return expandedBackdrop
         }
 
-        if toggleButton.frame.insetBy(dx: -6, dy: -6).contains(point) {
+        if !toggleButton.isHidden && toggleButton.frame.insetBy(dx: -6, dy: -6).contains(point) {
             return toggleButton
         }
         if !keyboardPillButton.isHidden && keyboardPillButton.frame.insetBy(dx: -4, dy: -4).contains(point) {
@@ -695,8 +700,9 @@ private final class GameOverlayViewController: UIViewController, UITableViewData
 
     private func updateVisibility() {
         let modalOpen = activeModal != nil
+        toggleButton.isHidden = !showFloatingButton && !isHUDExpanded && !modalOpen
         expandedBackdrop.isHidden = !isHUDExpanded && !modalOpen
-        quickBarView.isHidden = isHUDExpanded || modalOpen || !showQuickBar
+        quickBarView.isHidden = isHUDExpanded || modalOpen || !showQuickBar || !showFloatingButton
         toolGridContainer.isHidden = !isHUDExpanded || modalOpen
         volumePill.isHidden = !isHUDExpanded || modalOpen
         mouseToggleButton.isHidden = !(isHUDExpanded || isMouseEnabled) || modalOpen
